@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="120dp"
+    android:height="120dp"
+    android:viewportWidth="120"
+    android:viewportHeight="120">
+    <!-- Outer soft halo -->
+    <path
+        android:fillColor="#1A10B981"
+        android:pathData="M60,8 A52,52 0 1,1 60,112 A52,52 0 1,1 60,8 Z" />
+    <!-- Headphones Band -->
+    <path
+        android:fillColor="#0D9488"
+        android:pathData="M24,58 C24,34 39,20 60,20 C81,20 96,34 96,58 L90,58 C90,38 77,26 60,26 C43,26 30,38 30,58 Z" />
+    <!-- Owl-Falcon Body -->
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M32,56 C32,37 44,28 60,28 C76,28 88,37 88,56 L88,84 C88,96 76,104 60,104 C44,104 32,96 32,84 Z" />
+    <!-- Golden Feather Crest -->
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M46,28 L38,16 L54,25 L60,14 L66,25 L82,16 L74,28 Z" />
+    <!-- Belly Patch -->
+    <path
+        android:fillColor="#D1FAE5"
+        android:pathData="M42,68 C42,60 50,56 60,56 C70,56 78,60 78,68 L78,86 C78,94 70,98 60,98 C50,98 42,94 42,86 Z" />
+    <!-- Eyes White -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M47,48 A10,10 0 1,1 47,68 A10,10 0 1,1 47,48 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M73,48 A10,10 0 1,1 73,68 A10,10 0 1,1 73,48 Z" />
+    <!-- Pupils -->
+    <path
+        android:fillColor="#0F141C"
+        android:pathData="M48,53 A5,5 0 1,1 48,63 A5,5 0 1,1 48,53 Z" />
+    <path
+        android:fillColor="#0F141C"
+        android:pathData="M72,53 A5,5 0 1,1 72,63 A5,5 0 1,1 72,53 Z" />
+    <!-- Eye Sparkles -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M46,54 A2,2 0 1,1 46,58 A2,2 0 1,1 46,54 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M70,54 A2,2 0 1,1 70,58 A2,2 0 1,1 70,54 Z" />
+    <!-- Golden Beak -->
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M55,60 L65,60 L60,69 Z" />
+    <!-- Headphone Ear Cups -->
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M20,50 L32,50 L32,68 L20,68 Z" />
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M88,50 L100,50 L100,68 L88,68 Z" />
+</vector>

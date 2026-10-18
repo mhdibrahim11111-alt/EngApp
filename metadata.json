@@ -1,0 +1,6 @@
+{
+  "name": "LinguaBridge",
+  "description": "Arabic-first AI English learning app combining gamified lessons, SM-2 spaced repetition, Trancy-style dual subtitles, and ELSA-style pronunciation coaching.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

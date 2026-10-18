@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">LinguaBridge</string>
+    <string name="tab_home">الرئيسية</string>
+    <string name="tab_learn">تعلّم</string>
+    <string name="tab_watch">شاهد وتعلّم</string>
+    <string name="tab_speak">النطق والمحادثة</string>
+    <string name="tab_profile">ملفي</string>
+    <string name="review_due_today">مراجعة اليوم المستحقة</string>
+    <string name="import_deck_title">استيراد بطاقات CSV / JSON</string>
+    <string name="ai_definition_title">تعريف الذكاء الاصطناعي التفصيلي</string>
+</resources>
