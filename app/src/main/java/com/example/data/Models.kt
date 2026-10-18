@@ -1,6 +1,8 @@
 package com.example.data
 
 import androidx.room.Entity
+import androidx.room.Fts4
+import androidx.room.Index
 import androidx.room.PrimaryKey
 import kotlinx.serialization.Serializable
 
@@ -10,14 +12,30 @@ enum class DeckType(
     val titleAr: String,
     val totalCatalogTarget: Int
 ) {
-    IELTS("IELTS", "IELTS Core", "مفردات الآيلتس الأكاديمية", 3575),
-    IT("IT", "IT Industry", "مصطلحات البرمجة والتقنية", 1700),
-    OXFORD("OXFORD", "Oxford 5000", "أكسفورد 5000 الأساسي", 5836);
+    OXFORD("oxford5000", "Oxford 5000", "أكسفورد 5000 الأساسي", 5836),
+    OPAL("oxford_opal", "Oxford OPAL", "أكسفورد الأكاديمي OPAL", 2096),
+    PHRASES("oxford_phrases", "Oxford Phrases", "عبارات أكسفورد", 750),
+    EVERYDAY("everyday_expressions", "Everyday Expressions", "تعبيرات يومية", 600),
+    IDIOMS("essential_idioms", "Essential Idioms", "مصطلحات أساسية", 468),
+    IELTS("ielts_core", "IELTS Core", "مفردات الآيلتس الأكاديمية", 3575),
+    IT("it_industry", "IT Industry", "مصطلحات البرمجة والتقنية", 1700);
 
     companion object {
         fun fromString(raw: String): DeckType {
-            val upper = raw.trim().uppercase()
-            return entries.find { it.id == upper || upper.contains(it.id) } ?: OXFORD
+            val trimmed = raw.trim().lowercase()
+            return entries.find { 
+                it.id.equals(trimmed, ignoreCase = true) || 
+                it.name.equals(trimmed, ignoreCase = true) ||
+                it.titleEn.contains(raw, ignoreCase = true)
+            } ?: when {
+                trimmed.contains("ielts") -> IELTS
+                trimmed.contains("it") || trimmed.contains("tech") -> IT
+                trimmed.contains("opal") -> OPAL
+                trimmed.contains("phrase") -> PHRASES
+                trimmed.contains("idiom") -> IDIOMS
+                trimmed.contains("everyday") || trimmed.contains("expression") -> EVERYDAY
+                else -> OXFORD
+            }
         }
     }
 }
@@ -48,41 +66,180 @@ enum class VocabFilterTab(val labelEn: String) {
     FAVORITES("Favorites")
 }
 
-@Entity(tableName = "words")
+/**
+ * Raw JSON item from bundled assets or bulk import
+ */
 @Serializable
-data class WordEntity(
-    @PrimaryKey(autoGenerate = true) val id: Int = 0,
-    val word: String,
-    val syllabified: String = word,
-    val partOfSpeech: String, // n., v., adj., adv.
-    val secondaryPos: String = "", // e.g. "n." when primary is "v." (like abandon / supplement / jumble)
-    val secondaryArabic: String = "",
-    val cefrLevel: String,    // A1, A2, B1, B2, C1
-    val deck: String,         // OXFORD, IELTS, IT
-    val arabicTranslation: String,
-    val webArabicSynonyms: String = "",
-    val englishDefinition: String,
-    val exampleEn1: String,
-    val exampleAr1: String,
-    val exampleEn2: String,
-    val exampleAr2: String,
-    val ipaUs: String,
-    val ipaGb: String = ipaUs,
-    val synonyms: String,
-    val pluralOrGrammarNote: String = "",
+data class EntryJsonDto(
+    val id: Int? = null,
+    val type: String = "word",
+    val deck: String = "oxford5000",
+    val text: String = "",
+    val pos: String = "",
+    val level: String = "",
+    val definition_en: String = "",
+    val note_en: String = "",
+    val examples_en: String = "",
+    val definition_url: String = "",
+    val audio_url: String = "",
+    val arabic: String = ""
+)
+
+/**
+ * Main entries table (indexed on text, deck, level)
+ */
+@Entity(
+    tableName = "entries",
+    indices = [
+        Index(value = ["text"]),
+        Index(value = ["deck"]),
+        Index(value = ["level"])
+    ]
+)
+@Serializable
+data class EntryEntity(
+    @PrimaryKey val id: Int,
+    val type: String, // word | academic | phrase | expression | idiom
+    val deck: String, // oxford5000, oxford_opal, oxford_phrases, everyday_expressions, essential_idioms, ielts_core, it_industry
+    val text: String,
+    val pos: String,
+    val level: String, // A1-C1
+    val definitionEn: String = "",
+    val noteEn: String = "",
+    val examplesEn: String = "", // sentences separated by " | "
+    val definitionUrl: String = "",
+    val audioUrl: String = "",
+    val arabic: String = "",
+    val ipa: String = "",
+    val syllables: String = "",
     val etymologyAr: String = "",
-    val arabicSpeakerTipMsa: String = "",
-    val arabicSpeakerTipEgyptian: String = "",
+    val exampleAr: String = "",
+    val isEnriched: Boolean = false
+) {
+    val word: String get() = text
+    val partOfSpeech: String get() = pos
+    val cefrLevel: String get() = level
+    val arabicTranslation: String get() = arabic
+    val englishDefinition: String get() = definitionEn
+    val ipaUs: String get() = ipa
+    val ipaGb: String get() = ipa
+    val syllabified: String get() = syllables.ifBlank { text }
+    val exampleEn1: String get() = examplesEn.split(" | ").firstOrNull().orEmpty()
+    val exampleEn2: String get() = examplesEn.split(" | ").getOrNull(1).orEmpty()
+    val exampleAr1: String get() = exampleAr.split(" | ").firstOrNull().orEmpty()
+    val exampleAr2: String get() = exampleAr.split(" | ").getOrNull(1).orEmpty()
+}
+
+/**
+ * FTS4 virtual table for full-text search on text, definition, and arabic
+ */
+@Entity(tableName = "entries_fts")
+@Fts4(contentEntity = EntryEntity::class)
+data class EntryFtsEntity(
+    val text: String,
+    val definitionEn: String,
+    val arabic: String
+)
+
+/**
+ * Decks table
+ */
+@Entity(tableName = "decks")
+@Serializable
+data class DeckEntity(
+    @PrimaryKey val id: String,
+    val nameEn: String,
+    val nameAr: String,
+    val description: String = "",
+    val totalCount: Int = 0,
+    val targetCount: Int = 0
+)
+
+/**
+ * Progress table (SRS, mastered, favorite)
+ */
+@Entity(tableName = "progress")
+@Serializable
+data class ProgressEntity(
+    @PrimaryKey val entryId: Int,
     val masteryLevel: String = MasteryLevel.NEW.name,
+    val isMastered: Boolean = false,
     val isFavorite: Boolean = false,
-    val createdAt: Long = System.currentTimeMillis(),
     val repetitions: Int = 0,
     val easeFactor: Float = 2.5f,
     val intervalDays: Int = 0,
     val nextReviewDate: Long = 0L,
     val correctCount: Int = 0,
     val mistakeCount: Int = 0,
-    val isWeakWord: Boolean = false
+    val isWeakWord: Boolean = false,
+    val lastReviewedAt: Long = 0L,
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+/**
+ * Compound view model combining entry and its progress
+ */
+data class EntryWithProgress(
+    val entry: EntryEntity,
+    val progress: ProgressEntity?
+) {
+    val id: Int get() = entry.id
+    val text: String get() = entry.text
+    val word: String get() = entry.text
+    val deck: String get() = entry.deck
+    val pos: String get() = entry.pos
+    val partOfSpeech: String get() = entry.pos
+    val level: String get() = entry.level
+    val cefrLevel: String get() = entry.level
+    val definitionEn: String get() = entry.definitionEn
+    val englishDefinition: String get() = entry.definitionEn
+    val noteEn: String get() = entry.noteEn
+    val examplesEn: String get() = entry.examplesEn
+    val exampleEn1: String get() = entry.exampleEn1
+    val exampleEn2: String get() = entry.exampleEn2
+    val exampleAr1: String get() = entry.exampleAr1
+    val exampleAr2: String get() = entry.exampleAr2
+    val audioUrl: String get() = entry.audioUrl
+    val definitionUrl: String get() = entry.definitionUrl
+    val arabic: String get() = entry.arabic
+    val arabicTranslation: String get() = entry.arabic
+    val ipa: String get() = entry.ipa
+    val ipaUs: String get() = entry.ipa
+    val ipaGb: String get() = entry.ipa
+    val syllables: String get() = entry.syllables
+    val syllabified: String get() = entry.syllabified
+    val etymologyAr: String get() = entry.etymologyAr
+    val exampleAr: String get() = entry.exampleAr
+    val isEnriched: Boolean get() = entry.isEnriched
+    val isFavorite: Boolean get() = progress?.isFavorite ?: false
+    val isMastered: Boolean get() = progress?.isMastered ?: false
+    val masteryLevel: String get() = progress?.masteryLevel ?: MasteryLevel.NEW.name
+    val nextReviewDate: Long get() = progress?.nextReviewDate ?: 0L
+    val repetitions: Int get() = progress?.repetitions ?: 0
+    val easeFactor: Float get() = progress?.easeFactor ?: 2.5f
+    val intervalDays: Int get() = progress?.intervalDays ?: 0
+    val correctCount: Int get() = progress?.correctCount ?: 0
+    val mistakeCount: Int get() = progress?.mistakeCount ?: 0
+    val isWeakWord: Boolean get() = progress?.isWeakWord ?: false
+    val createdAt: Long get() = progress?.createdAt ?: 0L
+    val secondaryPos: String get() = ""
+    val secondaryArabic: String get() = ""
+    val webArabicSynonyms: String get() = ""
+    val synonyms: String get() = ""
+    val pluralOrGrammarNote: String get() = entry.noteEn
+    val arabicSpeakerTipMsa: String get() = ""
+    val arabicSpeakerTipEgyptian: String get() = ""
+}
+
+/**
+ * AI Cache table (entry id, json result, timestamp)
+ */
+@Entity(tableName = "ai_cache")
+@Serializable
+data class AiCacheEntity(
+    @PrimaryKey val entryId: String,
+    val jsonResult: String,
+    val timestamp: Long = System.currentTimeMillis()
 )
 
 @Entity(tableName = "user_stats")
@@ -91,9 +248,9 @@ data class UserStatsEntity(
     val onboardingCompleted: Boolean = false,
     val learningGoal: String = "GENERAL", // IELTS, IT, GENERAL
     val cefrLevel: String = "B1",
-    val dailyGoalMinutes: Int = 10,       // 5, 10, 20
-    val uiLanguage: String = "AR",        // AR (default RTL) or EN (LTR)
-    val arabicDialect: String = "MSA",    // MSA or EGYPTIAN
+    val dailyGoalMinutes: Int = 10,
+    val uiLanguage: String = "AR",
+    val arabicDialect: String = "MSA",
     val darkMode: Boolean = true,
     val xp: Int = 420,
     val level: Int = 3,
@@ -103,7 +260,7 @@ data class UserStatsEntity(
     val maxHearts: Int = 5,
     val minutesStudiedToday: Int = 7,
     val totalMinutesStudied: Int = 185,
-    val activeDecksCsv: String = "OXFORD,IELTS,IT",
+    val activeDecksCsv: String = "oxford5000,oxford_opal,oxford_phrases,everyday_expressions,essential_idioms,ielts_core,it_industry",
     val totalAnswers: Int = 48,
     val correctAnswers: Int = 41,
     val streakCalendarCsv: String = "1,1,1,0,1,1,1,1,1"
@@ -123,7 +280,7 @@ data class KeyVocabItem(
     val word: String,
     val arabic: String,
     val ipa: String,
-    val deck: String = "OXFORD"
+    val deck: String = "oxford5000"
 )
 
 @Entity(tableName = "transcripts")
@@ -132,7 +289,7 @@ data class TranscriptLessonEntity(
     val titleEn: String,
     val titleAr: String,
     val speakerOrSource: String,
-    val category: String, // OXFORD, IELTS, IT, CUSTOM
+    val category: String,
     val cefrLevel: String,
     val durationSec: Int,
     val videoUrlOrTag: String,
@@ -166,13 +323,6 @@ data class PronunciationAttemptEntity(
     val overallScore: Int,
     val evaluationJson: String,
     val timestamp: Long = System.currentTimeMillis()
-)
-
-@Entity(tableName = "ai_cache")
-data class AiCacheEntity(
-    @PrimaryKey val cacheKey: String,
-    val responseJson: String,
-    val createdAt: Long = System.currentTimeMillis()
 )
 
 enum class PhonemeChallengeCategory(
@@ -267,7 +417,7 @@ enum class ExerciseType(val labelAr: String, val labelEn: String) {
 
 data class ExerciseItem(
     val type: ExerciseType,
-    val targetWord: WordEntity,
+    val targetWord: EntryWithProgress,
     val promptText: String,
     val subPromptText: String = "",
     val options: List<String> = emptyList(),
@@ -353,3 +503,6 @@ data class LeaderboardEntry(
     val badge: String,
     val isCurrentUser: Boolean = false
 )
+
+// Legacy alias for any remaining references
+typealias WordEntity = EntryWithProgress
