@@ -1,62 +1,27 @@
 package com.example.data
 
-import android.content.Context
-import androidx.paging.Pager
-import androidx.paging.PagingConfig
-import androidx.paging.PagingData
-import androidx.paging.map
-import com.github.doyaaaaaken.kotlincsv.dsl.csvReader
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 
 class LinguaRepository(
-    val database: LinguaDatabase,
-    val geminiService: GeminiService,
-    private val context: Context
+    private val dao: LinguaDao,
+    val geminiService: GeminiService
 ) {
-    private val dao = database.linguaDao()
-
-    val allWords: Flow<List<EntryWithProgress>> = dao.observeAllEntriesWithProgress().map { list ->
-        list.map { it.toEntryWithProgress() }
-    }
-
+    val allWords: Flow<List<WordEntity>> = dao.observeAllWords()
     val userStats: Flow<UserStatsEntity?> = dao.observeUserStats()
     val allTranscripts: Flow<List<TranscriptLessonEntity>> = dao.observeTranscripts()
     val pronunciationHistory: Flow<List<PronunciationAttemptEntity>> = dao.observePronunciationAttempts()
-    val decks: Flow<List<DeckEntity>> = dao.observeDecks()
 
-    fun getPagedEntries(deck: String?): Flow<PagingData<EntryWithProgress>> {
-        return Pager(
-            config = PagingConfig(pageSize = 40, prefetchDistance = 10, enablePlaceholders = false),
-            pagingSourceFactory = { dao.pagingSourceEntries(deck) }
-        ).flow.map { pagingData ->
-            pagingData.map { it.toEntryWithProgress() }
-        }
-    }
-
-    fun searchEntriesFts(query: String): Flow<List<EntryWithProgress>> {
-        val cleanQuery = query.trim().replace("'", "").replace("\"", "")
-        if (cleanQuery.isBlank()) return allWords
-        // FTS match query with prefix
-        val ftsQuery = "$cleanQuery*"
-        return dao.searchEntriesFts(ftsQuery).map { list ->
-            list.map { it.toEntryWithProgress() }
-        }
-    }
-
-    suspend fun ensureSeeded() = withContext(Dispatchers.IO) {
+    suspend fun ensureSeeded() {
         if (dao.getUserStatsOnce() == null) {
             dao.saveUserStats(UserStatsEntity())
+        }
+        if (dao.getWordCount() == 0) {
+            dao.insertWords(SeedData.getInitialWords())
         }
         if (dao.getTranscriptCount() == 0) {
             dao.insertTranscripts(SeedTranscriptsAndDrills.getInitialTranscripts())
         }
-        // Background import bundled assets if needed
-        AssetImporter.importBundledAssetsIfNeeded(context, database)
     }
 
     suspend fun updateStats(transform: (UserStatsEntity) -> UserStatsEntity) {
@@ -65,11 +30,9 @@ class LinguaRepository(
         dao.saveUserStats(updated)
     }
 
-    suspend fun gradeWordSrs(word: EntryWithProgress, grade: SrsGrade) {
-        val currentProgress = dao.getProgressForEntry(word.id) ?: ProgressEntity(entryId = word.id)
-        val updated = SrsEngine.applyReview(currentProgress, grade)
-        dao.saveProgress(updated)
-
+    suspend fun gradeWordSrs(word: WordEntity, grade: SrsGrade) {
+        val updated = SrsEngine.applyReview(word, grade)
+        dao.updateWord(updated)
         updateStats { stats ->
             val xpGain = when (grade) {
                 SrsGrade.EASY -> 15
@@ -87,36 +50,33 @@ class LinguaRepository(
         }
     }
 
-    suspend fun toggleWordMastered(word: EntryWithProgress): EntryWithProgress {
-        val currentProgress = dao.getProgressForEntry(word.id) ?: ProgressEntity(entryId = word.id)
-        val updated = SrsEngine.toggleMastered(currentProgress)
-        dao.saveProgress(updated)
-        return word.copy(progress = updated)
+    suspend fun toggleWordMastered(word: WordEntity): WordEntity {
+        val updated = SrsEngine.toggleMastered(word)
+        dao.updateWord(updated)
+        return updated
     }
 
-    suspend fun toggleWordFavorite(word: EntryWithProgress): EntryWithProgress {
-        val currentProgress = dao.getProgressForEntry(word.id) ?: ProgressEntity(entryId = word.id)
-        val updated = currentProgress.copy(isFavorite = !currentProgress.isFavorite)
-        dao.saveProgress(updated)
-        return word.copy(progress = updated)
+    suspend fun toggleWordFavorite(word: WordEntity): WordEntity {
+        val updated = word.copy(isFavorite = !word.isFavorite)
+        dao.updateWord(updated)
+        return updated
     }
 
-    suspend fun recordExerciseOutcome(word: EntryWithProgress, isCorrect: Boolean) {
-        val currentProgress = dao.getProgressForEntry(word.id) ?: ProgressEntity(entryId = word.id)
+    suspend fun recordExerciseOutcome(word: WordEntity, isCorrect: Boolean) {
         val updated = if (isCorrect) {
-            currentProgress.copy(
-                correctCount = currentProgress.correctCount + 1,
-                masteryLevel = if (currentProgress.masteryLevel == MasteryLevel.NEW.name) MasteryLevel.LEARNING.name else currentProgress.masteryLevel,
-                isWeakWord = if (currentProgress.correctCount + 1 > currentProgress.mistakeCount + 1) false else currentProgress.isWeakWord
+            word.copy(
+                correctCount = word.correctCount + 1,
+                masteryLevel = if (word.masteryLevel == MasteryLevel.NEW.name) MasteryLevel.LEARNING.name else word.masteryLevel,
+                isWeakWord = if (word.correctCount + 1 > word.mistakeCount + 1) false else word.isWeakWord
             )
         } else {
-            currentProgress.copy(
-                mistakeCount = currentProgress.mistakeCount + 1,
+            word.copy(
+                mistakeCount = word.mistakeCount + 1,
                 isWeakWord = true,
                 nextReviewDate = System.currentTimeMillis()
             )
         }
-        dao.saveProgress(updated)
+        dao.updateWord(updated)
 
         updateStats { stats ->
             val newXp = if (isCorrect) stats.xp + 12 else stats.xp + 2
@@ -132,71 +92,132 @@ class LinguaRepository(
     }
 
     /**
-     * Finds all POS variants for the same text
+     * Parses CSV or JSON input (columns: word, pos, level, deck, arabic, definition, example)
+     * and uses Gemini to batch auto-fill missing Arabic translation, IPA, etymology, and examples.
      */
-    suspend fun getWordVariants(text: String): List<EntryWithProgress> {
-        return dao.getEntriesWithProgressByText(text).map { it.toEntryWithProgress() }
-    }
+    suspend fun importCustomDeckData(rawInput: String, defaultDeck: String, dialect: String): Int {
+        val trimmed = rawInput.trim()
+        if (trimmed.isBlank()) return 0
 
-    /**
-     * Lazy AI enrichment for a single card opened by the user
-     */
-    suspend fun lazyEnrichEntry(entry: EntryEntity, dialect: String = "MSA"): EntryEntity {
-        if (entry.isEnriched && entry.arabic.isNotBlank() && entry.ipa.isNotBlank()) {
-            return entry
+        val parsedPartials = mutableListOf<WordEntity>()
+        if (trimmed.startsWith("[")) {
+            // JSON array format
+            try {
+                val dtos = geminiService.json.decodeFromString<List<AutoFillWordDto>>(trimmed)
+                dtos.forEach { d ->
+                    if (d.word.isNotBlank()) {
+                        parsedPartials.add(
+                            WordEntity(
+                                word = d.word.trim(),
+                                partOfSpeech = d.partOfSpeech.ifBlank { "n." },
+                                cefrLevel = d.cefrLevel.ifBlank { "B1" },
+                                deck = defaultDeck,
+                                arabicTranslation = d.arabicTranslation,
+                                englishDefinition = d.englishDefinition,
+                                exampleEn1 = d.exampleEn1,
+                                exampleAr1 = d.exampleAr1,
+                                exampleEn2 = d.exampleEn2,
+                                exampleAr2 = d.exampleAr2,
+                                ipaUs = d.ipaUs,
+                                synonyms = d.synonyms,
+                                nextReviewDate = System.currentTimeMillis()
+                            )
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+                // Fallback to CSV line parsing
+            }
         }
-        val enriched = geminiService.enrichSingleEntry(entry, dialect)
-        dao.updateEntry(enriched)
-        return enriched
+
+        if (parsedPartials.isEmpty()) {
+            // CSV parsing: word, pos, level, deck, arabic, definition, example
+            val lines = trimmed.lines().map { it.trim() }.filter { it.isNotBlank() }
+            lines.forEachIndexed { index, line ->
+                val cols = line.split(",").map { it.trim().removeSurrounding("\"") }
+                if (index == 0 && cols.firstOrNull()?.lowercase() == "word") return@forEachIndexed
+                val wordText = cols.getOrNull(0).orEmpty()
+                if (wordText.isNotBlank()) {
+                    val pos = cols.getOrNull(1).orEmpty().ifBlank { "n." }
+                    val level = cols.getOrNull(2).orEmpty().uppercase().ifBlank { "B1" }
+                    val deckCol = cols.getOrNull(3).orEmpty().ifBlank { defaultDeck }
+                    val deck = DeckType.fromString(deckCol).id
+                    val arabic = cols.getOrNull(4).orEmpty()
+                    val definition = cols.getOrNull(5).orEmpty()
+                    val example = cols.getOrNull(6).orEmpty()
+
+                    parsedPartials.add(
+                        WordEntity(
+                            word = wordText,
+                            partOfSpeech = pos,
+                            cefrLevel = if (level in listOf("A1", "A2", "B1", "B2", "C1")) level else "B1",
+                            deck = deck,
+                            arabicTranslation = arabic,
+                            englishDefinition = definition,
+                            exampleEn1 = example,
+                            exampleAr1 = "",
+                            exampleEn2 = "",
+                            exampleAr2 = "",
+                            ipaUs = "",
+                            synonyms = "",
+                            nextReviewDate = System.currentTimeMillis()
+                        )
+                    )
+                }
+            }
+        }
+
+        if (parsedPartials.isEmpty()) return 0
+
+        // Batch auto-fill in chunks of up to 10 via Gemini
+        val enriched = parsedPartials.chunked(10).flatMap { batch ->
+            val needsAutoFill = batch.any { it.arabicTranslation.isBlank() || it.ipaUs.isBlank() || it.exampleAr1.isBlank() }
+            if (needsAutoFill) {
+                geminiService.autoFillImportedWords(batch, dialect)
+            } else {
+                batch
+            }
+        }
+
+        dao.insertWords(enriched)
+        updateStats { it.copy(xp = it.xp + enriched.size * 5) }
+        return enriched.size
     }
 
     suspend fun addWordFromSubtitleOrLookup(
         wordText: String,
-        deck: String = "oxford5000",
+        deck: String = "OXFORD",
         dialect: String = "MSA"
-    ): EntryWithProgress {
+    ): WordEntity {
         val clean = wordText.replace(Regex("[^a-zA-Z-]"), "").trim()
-        val existing = dao.findEntryByText(clean)
+        val existing = dao.findWordByText(clean)
         if (existing != null) {
-            val progress = dao.getProgressForEntry(existing.id) ?: ProgressEntity(entryId = existing.id)
-            val updatedProgress = progress.copy(
+            val updated = existing.copy(
                 masteryLevel = MasteryLevel.LEARNING.name,
                 nextReviewDate = System.currentTimeMillis()
             )
-            dao.saveProgress(updatedProgress)
-            return EntryWithProgress(existing, updatedProgress)
+            dao.updateWord(updated)
+            return updated
         }
-
-        val newId = (System.currentTimeMillis() % 1_000_000_000L).toInt()
-        val partial = EntryEntity(
-            id = newId,
-            type = "word",
+        val partial = WordEntity(
+            word = clean.ifBlank { wordText },
+            partOfSpeech = "n.",
+            cefrLevel = "B2",
             deck = deck,
-            text = clean.ifBlank { wordText },
-            pos = "n.",
-            level = "B2",
-            definitionEn = "",
-            noteEn = "",
-            examplesEn = "",
-            definitionUrl = "",
-            audioUrl = "",
-            arabic = "",
-            ipa = "",
-            syllables = "",
-            etymologyAr = "",
-            exampleAr = "",
-            isEnriched = false
-        )
-        val enriched = geminiService.enrichSingleEntry(partial, dialect)
-        dao.insertOrUpdateEntry(enriched)
-        val progress = ProgressEntity(
-            entryId = enriched.id,
+            arabicTranslation = "",
+            englishDefinition = "",
+            exampleEn1 = "",
+            exampleAr1 = "",
+            exampleEn2 = "",
+            exampleAr2 = "",
+            ipaUs = "",
+            synonyms = "",
             masteryLevel = MasteryLevel.LEARNING.name,
             nextReviewDate = System.currentTimeMillis()
         )
-        dao.saveProgress(progress)
-        dao.recalculateDeckCounts()
-        return EntryWithProgress(enriched, progress)
+        val enriched = geminiService.autoFillImportedWords(listOf(partial), dialect).first()
+        val id = dao.insertWord(enriched)
+        return enriched.copy(id = id.toInt())
     }
 
     suspend fun createCustomTranscriptLesson(

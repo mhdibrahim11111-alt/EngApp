@@ -101,10 +101,7 @@ fun TrancyWordCard(
     onSpeakSentence2: () -> Unit,
     onOpenAiDefinition: () -> Unit,
     onToggleMastered: () -> Unit,
-    modifier: Modifier = Modifier,
-    posVariants: List<WordEntity> = emptyList(),
-    onSelectVariant: (WordEntity) -> Unit = {},
-    isEnriching: Boolean = false
+    modifier: Modifier = Modifier
 ) {
     val accent = deckAccentColor(word.deck)
     val isMastered = word.masteryLevel == MasteryLevel.MASTERED.name
@@ -128,7 +125,7 @@ fun TrancyWordCard(
                 .padding(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Top badges: Deck + CEFR Level + POS Tabs for same word
+            // Top badges: Deck + CEFR Level
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -159,45 +156,6 @@ fun TrancyWordCard(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                     )
                 }
-            }
-
-            // Multi-POS Tabs if the word has multiple parts of speech
-            if (posVariants.size > 1) {
-                Spacer(modifier = Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    posVariants.forEach { variant ->
-                        val isSelected = variant.id == word.id
-                        Surface(
-                            color = if (isSelected) accent.copy(alpha = 0.25f) else Color(0xFF1A202C),
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, if (isSelected) accent else Color(0xFF2D3748)),
-                            modifier = Modifier
-                                .padding(horizontal = 4.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { onSelectVariant(variant) }
-                        ) {
-                            Text(
-                                text = variant.pos.ifBlank { "word" },
-                                color = if (isSelected) Color.White else Color(0xFF94A3B8),
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-                }
-            }
-
-            if (isEnriching) {
-                Spacer(modifier = Modifier.height(8.dp))
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)),
-                    color = accent,
-                    trackColor = Color(0xFF1F2430)
-                )
             }
 
             Spacer(modifier = Modifier.height(14.dp))

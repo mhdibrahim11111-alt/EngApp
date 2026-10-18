@@ -36,12 +36,9 @@ import com.example.ui.theme.*
 fun HomeScreen(
     words: List<WordEntity>,
     stats: UserStatsEntity,
-    decks: List<DeckEntity>,
-    assetImportProgress: AssetImportProgress,
     onStartSrsReview: (String?) -> Unit,
     onOpenVocabBrowser: (String?) -> Unit,
     onOpenCsvImport: () -> Unit,
-    onOpenGenerateVocab: () -> Unit,
     onStartLesson: (List<WordEntity>, Boolean) -> Unit,
     onToggleDeck: (DeckType) -> Unit,
     onInspectWord: (WordEntity) -> Unit,
@@ -49,11 +46,7 @@ fun HomeScreen(
     onSpeakWord: (String, Boolean) -> Unit,
     onToggleUiLang: () -> Unit,
     onToggleDialect: () -> Unit,
-    onToggleDarkMode: () -> Unit,
-    onStartDeckEnrichment: (String) -> Unit = {},
-    posVariants: List<WordEntity> = emptyList(),
-    onSelectVariant: (WordEntity) -> Unit = {},
-    isEnrichingCard: Boolean = false
+    onToggleDarkMode: () -> Unit
 ) {
     val isArabicUi = stats.uiLanguage == "AR"
     val now = System.currentTimeMillis()
@@ -112,14 +105,6 @@ fun HomeScreen(
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(
-                        onClick = onOpenGenerateVocab,
-                        modifier = Modifier.testTag("open_generate_vocab_button")
-                    ) {
-                        Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp), tint = OxfordGold)
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(if (isArabicUi) "توليد AI" else "Generate", color = OxfordGold)
-                    }
-                    TextButton(
                         onClick = { onOpenVocabBrowser(null) },
                         modifier = Modifier.testTag("open_vocab_browser_button")
                     ) {
@@ -139,67 +124,33 @@ fun HomeScreen(
             }
         }
 
-        // Background Asset Import Progress Bar
-        if (assetImportProgress.isImporting) {
-            item {
-                Surface(
-                    color = Color(0xFF13202C),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.5f))
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "جاري تهيئة واستيراد الكلمات الأصلية (${assetImportProgress.currentFileName})...",
-                                fontSize = 13.sp,
-                                color = Color.White
-                            )
-                            Text(
-                                text = "${assetImportProgress.importedCount} / ${assetImportProgress.totalEstimated}",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = EmeraldPrimary
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        LinearProgressIndicator(
-                            progress = { (assetImportProgress.importedCount.toFloat() / assetImportProgress.totalEstimated).coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
-                            color = EmeraldPrimary,
-                            trackColor = Color(0xFF042F2E)
-                        )
-                    }
-                }
-            }
-        }
-
         items(DeckType.entries) { deck ->
             val deckWords = words.filter { it.deck == deck.id }
-            val masteredCount = deckWords.count { it.isMastered || it.masteryLevel == MasteryLevel.MASTERED.name }
-            val totalInDb = deckWords.size.coerceAtLeast(deck.totalCatalogTarget)
+            val learnedInDemo = deckWords.count { it.masteryLevel != MasteryLevel.NEW.name }
+            val baseOffset = when (deck) {
+                DeckType.OXFORD -> 304
+                DeckType.IELTS -> 176
+                DeckType.IT -> 88
+            }
+            val displayedLearned = baseOffset + learnedInDemo
             val isSelected = deck.id in activeDeckSet
 
             DeckProgressCard(
                 deck = deck,
-                learnedCount = masteredCount,
+                learnedCount = displayedLearned,
                 demoCount = deckWords.size,
                 isSelected = isSelected,
                 isArabicUi = isArabicUi,
                 onToggleSelect = { onToggleDeck(deck) },
                 onOpenDeckWordList = { onOpenVocabBrowser(deck.id) },
                 onReviewDeck = { onStartSrsReview(deck.id) },
-                onPracticeDeckLesson = { onStartLesson(deckWords, false) },
-                onEnrichDeck = { onStartDeckEnrichment(deck.id) }
+                onPracticeDeckLesson = { onStartLesson(deckWords, false) }
             )
         }
 
         // 4. Trancy-Style Featured Word Card ("cattle" with Detailed AI Definition & Mastered toggle)
         if (featuredWord != null) {
             item {
-                val realIndex = words.indexOfFirst { it.id == featuredWord.id } + 1
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -214,7 +165,7 @@ fun HomeScreen(
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Text(
-                            text = "$realIndex / ${words.size.coerceAtLeast(1)}",
+                            text = "1 / 3571",
                             color = OxfordGold,
                             fontFamily = InterFontFamily,
                             fontWeight = FontWeight.Bold,
@@ -232,10 +183,7 @@ fun HomeScreen(
                     onSpeakSentence1 = { onSpeakWord(featuredWord.exampleEn1, false) },
                     onSpeakSentence2 = { onSpeakWord(featuredWord.exampleEn2, false) },
                     onOpenAiDefinition = { onInspectWord(featuredWord) },
-                    onToggleMastered = { onToggleMastered(featuredWord) },
-                    posVariants = posVariants,
-                    onSelectVariant = onSelectVariant,
-                    isEnriching = isEnrichingCard
+                    onToggleMastered = { onToggleMastered(featuredWord) }
                 )
             }
         }
@@ -521,20 +469,15 @@ private fun DeckProgressCard(
     onToggleSelect: () -> Unit,
     onOpenDeckWordList: () -> Unit,
     onReviewDeck: () -> Unit,
-    onPracticeDeckLesson: () -> Unit,
-    onEnrichDeck: () -> Unit = {}
+    onPracticeDeckLesson: () -> Unit
 ) {
     val accent = deckAccentColor(deck.id)
     val bookGradient = when (deck) {
         DeckType.IELTS -> listOf(Color(0xFF155E63), Color(0xFF0A363A))
         DeckType.IT -> listOf(Color(0xFF5B4582), Color(0xFF362752))
         DeckType.OXFORD -> listOf(Color(0xFF7C3228), Color(0xFF4B1B15))
-        DeckType.OPAL -> listOf(Color(0xFF1E3A8A), Color(0xFF172554))
-        DeckType.PHRASES -> listOf(Color(0xFF065F46), Color(0xFF064E3B))
-        DeckType.EVERYDAY -> listOf(Color(0xFFB45309), Color(0xFF78350F))
-        DeckType.IDIOMS -> listOf(Color(0xFF831843), Color(0xFF500724))
     }
-    val progress = (learnedCount.toFloat() / deck.totalCatalogTarget.toFloat().coerceAtLeast(1f)).coerceIn(0.04f, 1f)
+    val progress = (learnedCount.toFloat() / deck.totalCatalogTarget.toFloat()).coerceIn(0.04f, 1f)
 
     Card(
         modifier = Modifier
@@ -667,18 +610,6 @@ private fun DeckProgressCard(
                         color = Color(0xFF0F141C),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
-                    )
-                }
-
-                IconButton(
-                    onClick = onEnrichDeck,
-                    modifier = Modifier.size(38.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AutoAwesome,
-                        contentDescription = "Enrich deck with AI",
-                        tint = OxfordGold,
-                        modifier = Modifier.size(18.dp)
                     )
                 }
             }

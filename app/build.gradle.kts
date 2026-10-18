@@ -142,13 +142,6 @@ dependencies {
   androidTestImplementation(libs.androidx.runner)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
-  implementation("androidx.paging:paging-runtime-ktx:3.3.6")
-  implementation("androidx.paging:paging-compose:3.3.6")
-  implementation("androidx.room:room-paging:2.7.0")
-  implementation("androidx.work:work-runtime-ktx:2.10.0")
-  implementation("androidx.media3:media3-exoplayer:1.5.1")
-  implementation("com.github.doyaaaaaken:kotlin-csv-jvm:1.10.0")
-
   "ksp"(libs.androidx.room.compiler)
   // "ksp"(libs.moshi.kotlin.codegen)
 }

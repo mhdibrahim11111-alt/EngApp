@@ -2,7 +2,6 @@ package com.example.data
 
 import com.example.BuildConfig
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -54,32 +53,25 @@ data class Candidate(
 )
 
 @Serializable
-data class EnrichedWordDto(
-    val id: Int? = null,
-    val text: String = "",
-    val pos: String = "",
-    val level: String = "",
-    val arabic: String = "",
-    val ipa: String = "",
-    val syllables: String = "",
+data class AutoFillWordDto(
+    val word: String,
+    val syllabified: String = "",
+    val partOfSpeech: String = "n.",
+    val cefrLevel: String = "B1",
+    val arabicTranslation: String = "",
+    val webArabicSynonyms: String = "",
+    val englishDefinition: String = "",
+    val exampleEn1: String = "",
+    val exampleAr1: String = "",
+    val exampleEn2: String = "",
+    val exampleAr2: String = "",
+    val ipaUs: String = "",
+    val ipaGb: String = "",
+    val synonyms: String = "",
+    val pluralOrGrammarNote: String = "",
     val etymologyAr: String = "",
-    val exampleAr: String = "",
-    val definitionEn: String = "",
-    val examplesEn: String = ""
-)
-
-@Serializable
-data class GeneratedWordDto(
-    val text: String,
-    val pos: String = "noun",
-    val level: String = "B2",
-    val definition_en: String = "",
-    val arabic: String = "",
-    val ipa: String = "",
-    val syllables: String = "",
-    val examples_en: String = "",
-    val example_ar: String = "",
-    val etymology_ar: String = ""
+    val arabicSpeakerTipMsa: String = "",
+    val arabicSpeakerTipEgyptian: String = ""
 )
 
 @Serializable
@@ -106,7 +98,7 @@ data class SubtitleAiPackDto(
 )
 
 interface GeminiApiService {
-    @POST("v1beta/models/gemini-2.5-flash:generateContent")
+    @POST("v1beta/models/gemini-3.5-flash:generateContent")
     suspend fun generateContent(
         @Query("key") apiKey: String,
         @Body request: GenerateContentRequest
@@ -146,239 +138,131 @@ class GeminiService(private val dao: LinguaDao) {
         return key.isNotBlank() && key != "MY_GEMINI_API_KEY"
     }
 
-    /**
-     * Executes prompt with Gemini, strictly caches in `ai_cache` by entry/prompt key,
-     * strips code fences before parsing, and handles retries with exponential backoff.
-     */
     suspend fun callGeminiCached(
-        cacheKey: String,
+        cacheNamespace: String,
         prompt: String,
-        systemText: String = "You are an English language lexicographer providing strict JSON only.",
+        systemText: String = "You are LinguaBridge AI, an expert English teacher for native Arabic speakers.",
         jsonMode: Boolean = true
     ): Result<String> = withContext(Dispatchers.IO) {
-        val cached = dao.getAiCache(cacheKey)
-        if (cached != null && cached.jsonResult.isNotBlank()) {
-            return@withContext Result.success(cached.jsonResult)
+        val cacheKey = sha256("$cacheNamespace|$prompt")
+        val cached = dao.getCachedResponse(cacheKey)
+        if (cached != null && cached.responseJson.isNotBlank()) {
+            return@withContext Result.success(cached.responseJson)
         }
 
         if (!isApiKeyConfigured()) {
             return@withContext Result.failure(
-                IllegalStateException("Gemini API key is not configured in .env")
+                IllegalStateException("يرجى ضبط مفتاح GEMINI_API_KEY في لوحة Secrets داخل AI Studio لتفعيل الذكاء الاصطناعي المباشر.")
             )
         }
 
-        var attempt = 0
-        var delayMs = 1500L
-        var lastException: Exception? = null
-
-        while (attempt < 3) {
-            try {
-                val request = GenerateContentRequest(
-                    contents = listOf(Content(parts = listOf(Part(text = prompt)))),
-                    systemInstruction = Content(parts = listOf(Part(text = systemText))),
-                    generationConfig = GenerationConfig(
-                        responseMimeType = if (jsonMode) "application/json" else null,
-                        temperature = 0.2f
-                    )
+        try {
+            val request = GenerateContentRequest(
+                contents = listOf(Content(parts = listOf(Part(text = prompt)))),
+                systemInstruction = Content(parts = listOf(Part(text = systemText))),
+                generationConfig = GenerationConfig(
+                    responseMimeType = if (jsonMode) "application/json" else null,
+                    temperature = 0.4f
                 )
-                val response = api.generateContent(BuildConfig.GEMINI_API_KEY, request)
-                val rawText = response.candidates.firstOrNull()?.content?.parts?.firstOrNull()?.text?.trim()
-                    ?: return@withContext Result.failure(IllegalStateException("Empty response from Gemini"))
-
-                val cleaned = stripCodeFences(rawText)
-                dao.putAiCache(AiCacheEntity(entryId = cacheKey, jsonResult = cleaned))
-                return@withContext Result.success(cleaned)
-            } catch (e: Exception) {
-                lastException = e
-                attempt++
-                if (attempt < 3) {
-                    delay(delayMs)
-                    delayMs *= 2 // exponential backoff
-                }
-            }
+            )
+            val response = api.generateContent(BuildConfig.GEMINI_API_KEY, request)
+            val rawText = response.candidates.firstOrNull()?.content?.parts?.firstOrNull()?.text?.trim()
+                ?: return@withContext Result.failure(IllegalStateException("Empty response from Gemini"))
+            val cleaned = rawText.removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+            dao.putCachedResponse(AiCacheEntity(cacheKey = cacheKey, responseJson = cleaned))
+            Result.success(cleaned)
+        } catch (e: Exception) {
+            Result.failure(e)
         }
-        Result.failure(lastException ?: IllegalStateException("Gemini request failed"))
-    }
-
-    fun stripCodeFences(raw: String): String {
-        return raw.trim()
-            .removePrefix("```json")
-            .removePrefix("```")
-            .removeSuffix("```")
-            .trim()
     }
 
     /**
-     * Lazy enrichment for a single card opened by user
+     * Batch auto-fills missing Arabic translations, IPA, etymology, and bilingual examples on CSV/JSON import.
      */
-    suspend fun enrichSingleEntry(entry: EntryEntity, dialect: String = "MSA"): EntryEntity {
-        val cacheKey = "entry_${entry.id}"
-        val prompt = """
-            Provide missing linguistic data for this English entry:
-            Word/Text: "${entry.text}"
-            Part of Speech: "${entry.pos}"
-            Level: "${entry.level}"
-            Existing Definition: "${entry.definitionEn}"
-            Existing Examples: "${entry.examplesEn}"
-            
-            Return STRICT JSON with keys:
-            - arabic: Arabic translation (3 meanings separated by ' ; ')
-            - ipa: IPA pronunciation US e.g. /ˈkætl/
-            - syllables: Syllabified word with middle dot e.g. cat·tle
-            - etymologyAr: Brief Arabic explanation of word origin/etymology
-            - definitionEn: English definition if missing
-            - examplesEn: 2 English example sentences separated by " | "
-            - exampleAr: Arabic translation of each example sentence separated by " | "
-        """.trimIndent()
-
-        val res = callGeminiCached(cacheKey, prompt, jsonMode = true)
-        return res.fold(
-            onSuccess = { jsonText ->
-                try {
-                    val dto = json.decodeFromString<EnrichedWordDto>(jsonText)
-                    entry.copy(
-                        arabic = entry.arabic.ifBlank { dto.arabic },
-                        ipa = entry.ipa.ifBlank { dto.ipa },
-                        syllables = entry.syllables.ifBlank { dto.syllables },
-                        etymologyAr = entry.etymologyAr.ifBlank { dto.etymologyAr },
-                        definitionEn = entry.definitionEn.ifBlank { dto.definitionEn },
-                        examplesEn = entry.examplesEn.ifBlank { dto.examplesEn },
-                        exampleAr = entry.exampleAr.ifBlank { dto.exampleAr },
-                        isEnriched = true
-                    )
-                } catch (e: Exception) {
-                    applyFallbackEnrichment(entry)
-                }
-            },
-            onFailure = {
-                applyFallbackEnrichment(entry)
-            }
-        )
-    }
-
-    /**
-     * Batch enrichment (up to 25 entries per request)
-     */
-    suspend fun enrichBatchEntries(entries: List<EntryEntity>): List<EntryEntity> {
-        if (entries.isEmpty()) return emptyList()
-        val itemsSummary = entries.joinToString("\n") {
-            "id=${it.id}, text=${it.text}, pos=${it.pos}, level=${it.level}, def=${it.definitionEn}, ex=${it.examplesEn}"
+    suspend fun autoFillImportedWords(
+        partialWords: List<WordEntity>,
+        dialect: String
+    ): List<WordEntity> {
+        val wordsSummary = partialWords.joinToString("\n") {
+            "word=${it.word}, pos=${it.partOfSpeech}, level=${it.cefrLevel}, deck=${it.deck}, arabic=${it.arabicTranslation}, def=${it.englishDefinition}, ex=${it.exampleEn1}"
         }
-        val cacheKey = "batch_${entries.first().id}_${entries.last().id}"
         val prompt = """
-            Enrich these English vocabulary words with missing Arabic translation, IPA, syllables, etymology, and example translations.
-            Input list:
-            $itemsSummary
-            
-            Return a STRICT JSON array of objects with keys:
-            [
-              {
-                "id": integer,
-                "arabic": "3 Arabic meanings separated by ' ; '",
-                "ipa": "IPA US e.g. /ˈkætl/",
-                "syllables": "Syllabified e.g. cat·tle",
-                "etymologyAr": "Brief origin in Arabic",
-                "definitionEn": "English definition if empty",
-                "examplesEn": "2 sentences separated by ' | '",
-                "exampleAr": "Arabic translation of sentences separated by ' | '"
-              }
-            ]
+            Auto-fill any missing fields for these English vocabulary words for Arabic speakers.
+            Return a JSON array of objects matching keys:
+            word, syllabified (use middle dot · between syllables like cat·tle), partOfSpeech, cefrLevel,
+            arabicTranslation (3 synonyms separated by ' ; '), webArabicSynonyms (3 extra Arabic meanings separated by ' ; '),
+            englishDefinition, exampleEn1, exampleAr1, exampleEn2, exampleAr2, ipaUs, ipaGb, synonyms,
+            pluralOrGrammarNote (in Arabic/English), etymologyAr (brief Arabic word origin),
+            arabicSpeakerTipMsa (pronunciation or false-friend tip in Modern Standard Arabic),
+            arabicSpeakerTipEgyptian (friendly tip in Egyptian Arabic).
+            Input rows:
+            $wordsSummary
         """.trimIndent()
 
-        val res = callGeminiCached(cacheKey, prompt, jsonMode = true)
-        return res.fold(
+        val result = callGeminiCached("batch_autofill_$dialect", prompt, jsonMode = true)
+        return result.fold(
             onSuccess = { jsonText ->
                 try {
-                    val dtos = json.decodeFromString<List<EnrichedWordDto>>(jsonText)
-                    val map = dtos.associateBy { it.id }
-                    entries.map { orig ->
-                        val dto = map[orig.id]
+                    val dtos = json.decodeFromString<List<AutoFillWordDto>>(jsonText)
+                    val map = dtos.associateBy { it.word.lowercase().trim() }
+                    partialWords.map { orig ->
+                        val dto = map[orig.word.lowercase().trim()]
                         if (dto != null) {
                             orig.copy(
-                                arabic = orig.arabic.ifBlank { dto.arabic },
-                                ipa = orig.ipa.ifBlank { dto.ipa },
-                                syllables = orig.syllables.ifBlank { dto.syllables },
-                                etymologyAr = orig.etymologyAr.ifBlank { dto.etymologyAr },
-                                definitionEn = orig.definitionEn.ifBlank { dto.definitionEn },
-                                examplesEn = orig.examplesEn.ifBlank { dto.examplesEn },
-                                exampleAr = orig.exampleAr.ifBlank { dto.exampleAr },
-                                isEnriched = true
+                                syllabified = dto.syllabified.ifBlank { orig.word },
+                                partOfSpeech = orig.partOfSpeech.ifBlank { dto.partOfSpeech },
+                                cefrLevel = orig.cefrLevel.ifBlank { dto.cefrLevel },
+                                arabicTranslation = orig.arabicTranslation.ifBlank { dto.arabicTranslation },
+                                webArabicSynonyms = dto.webArabicSynonyms.ifBlank { orig.arabicTranslation },
+                                englishDefinition = orig.englishDefinition.ifBlank { dto.englishDefinition },
+                                exampleEn1 = orig.exampleEn1.ifBlank { dto.exampleEn1 },
+                                exampleAr1 = orig.exampleAr1.ifBlank { dto.exampleAr1 },
+                                exampleEn2 = dto.exampleEn2.ifBlank { "Let's practice using '${orig.word}' in a sentence." },
+                                exampleAr2 = dto.exampleAr2.ifBlank { "دعنا نتدرب على استخدام '${orig.word}' في جملة." },
+                                ipaUs = orig.ipaUs.ifBlank { dto.ipaUs.ifBlank { "/${orig.word}/" } },
+                                ipaGb = dto.ipaGb.ifBlank { orig.ipaUs.ifBlank { "/${orig.word}/" } },
+                                synonyms = orig.synonyms.ifBlank { dto.synonyms },
+                                pluralOrGrammarNote = dto.pluralOrGrammarNote,
+                                etymologyAr = dto.etymologyAr,
+                                arabicSpeakerTipMsa = dto.arabicSpeakerTipMsa,
+                                arabicSpeakerTipEgyptian = dto.arabicSpeakerTipEgyptian
                             )
                         } else orig
                     }
-                } catch (e: Exception) {
-                    entries.map { applyFallbackEnrichment(it) }
+                } catch (_: Exception) {
+                    applyLocalFallbackAutoFill(partialWords)
                 }
             },
             onFailure = {
-                entries.map { applyFallbackEnrichment(it) }
+                applyLocalFallbackAutoFill(partialWords)
             }
         )
+    }
+
+    private fun applyLocalFallbackAutoFill(words: List<WordEntity>): List<WordEntity> {
+        return words.map { w ->
+            w.copy(
+                syllabified = if (w.syllabified.isBlank()) w.word else w.syllabified,
+                arabicTranslation = w.arabicTranslation.ifBlank { "معنى ${w.word} (مُكمّل تلقائياً)" },
+                webArabicSynonyms = w.webArabicSynonyms.ifBlank { "مرادف ${w.word} ; تعبير شائع" },
+                englishDefinition = w.englishDefinition.ifBlank { "Core vocabulary term used in ${w.deck} contexts." },
+                exampleEn1 = w.exampleEn1.ifBlank { "Understanding '${w.word}' is essential for professional communication." },
+                exampleAr1 = w.exampleAr1.ifBlank { "فهم كلمة '${w.word}' ضروري للتواصل المهني." },
+                exampleEn2 = w.exampleEn2.ifBlank { "She used '${w.word}' accurately during the presentation." },
+                exampleAr2 = w.exampleAr2.ifBlank { "استخدمت كلمة '${w.word}' بدقة أثناء العرض التقديمي." },
+                ipaUs = w.ipaUs.ifBlank { "/${w.word.lowercase()}/" },
+                ipaGb = w.ipaGb.ifBlank { "/${w.word.lowercase()}/" },
+                synonyms = w.synonyms.ifBlank { "related term, equivalent" },
+                etymologyAr = w.etymologyAr.ifBlank { "كلمة إنجليزية ذات جذور لاتينية/أوروبية قديمة تطورت للاستخدام المعاصر." },
+                arabicSpeakerTipMsa = w.arabicSpeakerTipMsa.ifBlank { "انتبه لموضع التشديد الصوتي وحروف العلة القصيرة عند نطق ${w.word}." },
+                arabicSpeakerTipEgyptian = w.arabicSpeakerTipEgyptian.ifBlank { "ركز على نطق الحروف المتحركة في ${w.word} من غير ما تمدها زيادة." }
+            )
+        }
     }
 
     /**
-     * Tool: Generate vocabulary with AI in batches of 50
+     * Evaluates spoken pronunciation against target sentence/word with Arabic mouth-position tips.
      */
-    suspend fun generateVocabularyBatch(
-        topic: String,
-        cefrLevel: String,
-        count: Int = 50,
-        existingWordsLower: Set<String>
-    ): List<GeneratedWordDto> {
-        val prompt = """
-            Generate exactly $count advanced/useful English vocabulary items for topic: "$topic" at CEFR level "$cefrLevel".
-            Do NOT include any of the following already known words:
-            ${existingWordsLower.take(100).joinToString(", ")}
-            
-            Return a STRICT JSON array of objects with keys:
-            [
-              {
-                "text": "word or phrase",
-                "pos": "noun/verb/adjective/adverb",
-                "level": "$cefrLevel",
-                "definition_en": "clear definition",
-                "arabic": "Arabic translation (2-3 meanings separated by ' ; ')",
-                "ipa": "/IPA/",
-                "syllables": "syl·la·ble",
-                "examples_en": "Example sentence 1 | Example sentence 2",
-                "example_ar": "ترجمة الجملة الأولى | ترجمة الجملة الثانية",
-                "etymology_ar": "أصل الكلمة وتاريخها بالعربية"
-              }
-            ]
-        """.trimIndent()
-
-        val cacheKey = "gen_${topic}_${cefrLevel}_${System.currentTimeMillis()}"
-        val res = callGeminiCached(cacheKey, prompt, jsonMode = true)
-        return res.fold(
-            onSuccess = { jsonText ->
-                try {
-                    val list = json.decodeFromString<List<GeneratedWordDto>>(jsonText)
-                    list.filter { !existingWordsLower.contains(it.text.trim().lowercase()) }
-                } catch (e: Exception) {
-                    emptyList()
-                }
-            },
-            onFailure = {
-                emptyList()
-            }
-        )
-    }
-
-    private fun applyFallbackEnrichment(entry: EntryEntity): EntryEntity {
-        val clean = entry.text.lowercase()
-        return entry.copy(
-            arabic = entry.arabic.ifBlank { "معنى $clean" },
-            ipa = entry.ipa.ifBlank { "/$clean/" },
-            syllables = entry.syllables.ifBlank { entry.text },
-            etymologyAr = entry.etymologyAr.ifBlank { "كلمة إنجليزية شائعة الاستخدام في السياقات الأكاديمية والمهنية." },
-            definitionEn = entry.definitionEn.ifBlank { "A key English term used in ${entry.deck} contexts." },
-            examplesEn = entry.examplesEn.ifBlank { "We should practice using '$clean' in conversation. | Understanding '$clean' is essential." },
-            exampleAr = entry.exampleAr.ifBlank { "ينبغي أن نتدرب على استخدام '$clean' في المحادثة. | فهم '$clean' أمر أساسي." },
-            isEnriched = true
-        )
-    }
-
-    // --- Pronunciation & Tutor methods ---
     suspend fun evaluatePronunciation(
         targetText: String,
         spokenTranscript: String,
@@ -386,35 +270,78 @@ class GeminiService(private val dao: LinguaDao) {
     ): PronunciationEvaluation {
         val prompt = """
             Analyze an Arabic speaker's English pronunciation.
-            Target: "$targetText"
-            Spoken: "$spokenTranscript"
-            Category: ${focusCategory.id} (${focusCategory.symbols})
-            Return STRICT JSON:
-            {
-              "overallScore": 85,
-              "words": [ { "word": "$targetText", "score": 85, "ipaTarget": "/target/", "issueAr": "نطق جيد" } ],
-              "mouthTipMsa": "${focusCategory.tipMsa}",
-              "mouthTipEgyptian": "${focusCategory.tipEgyptian}",
-              "focusSoundLabel": "${focusCategory.symbols}"
-            }
+            Target text: "$targetText"
+            Spoken transcript captured: "$spokenTranscript"
+            Phonetic focus category: ${focusCategory.id} (${focusCategory.symbols})
+            
+            Return a JSON object with:
+            - overallScore: integer 0 to 100
+            - words: array of { "word": string, "score": integer 0-100, "ipaTarget": string, "issueAr": string in Arabic }
+            - mouthTipMsa: specific mouth/tongue/lip position advice in simple Modern Standard Arabic
+            - mouthTipEgyptian: specific mouth/tongue/lip position advice in friendly Egyptian Arabic
+            - focusSoundLabel: "${focusCategory.symbols}"
         """.trimIndent()
-        val res = callGeminiCached("pron_${targetText}_$spokenTranscript", prompt)
-        return res.fold(
-            onSuccess = { try { json.decodeFromString<PronunciationEvaluation>(it) } catch (e: Exception) { fallbackPronEval(targetText, focusCategory) } },
-            onFailure = { fallbackPronEval(targetText, focusCategory) }
+
+        val result = callGeminiCached("pron_${targetText}_$spokenTranscript", prompt, jsonMode = true)
+        return result.fold(
+            onSuccess = { jsonText ->
+                try {
+                    json.decodeFromString<PronunciationEvaluation>(jsonText)
+                } catch (_: Exception) {
+                    buildHeuristicPronunciationEval(targetText, spokenTranscript, focusCategory)
+                }
+            },
+            onFailure = {
+                buildHeuristicPronunciationEval(targetText, spokenTranscript, focusCategory)
+            }
         )
     }
 
-    private fun fallbackPronEval(targetText: String, focusCategory: PhonemeChallengeCategory): PronunciationEvaluation {
+    private fun buildHeuristicPronunciationEval(
+        targetText: String,
+        spokenTranscript: String,
+        focusCategory: PhonemeChallengeCategory
+    ): PronunciationEvaluation {
+        val targetWords = targetText.trim().split(Regex("\\s+"))
+        val spokenClean = spokenTranscript.lowercase()
+
+        val wordScores = targetWords.map { rawWord ->
+            val cleanW = rawWord.replace(Regex("[^a-zA-Z]"), "").lowercase()
+            val exactMatch = spokenClean.contains(cleanW) && cleanW.isNotEmpty()
+            val hasHardSound = cleanW.contains("p") || cleanW.contains("v") || cleanW.contains("th") || cleanW.startsWith("str")
+            val score = when {
+                exactMatch && !hasHardSound -> 92
+                exactMatch && hasHardSound -> 84
+                spokenClean.isNotBlank() -> 68
+                else -> 76
+            }
+            val issue = when {
+                score >= 80 -> "نطق ممتاز وواضح"
+                cleanW.contains("p") -> "احرص على إخراج دفعة هواء مع حرف P"
+                cleanW.contains("v") -> "أظهر اهتزاز الشفة السفلية في حرف V"
+                cleanW.contains("th") -> "أخرج طرف اللسان قليلاً في صوت th"
+                else -> "انتبه لطول الحركة الصوتية داخل الكلمة"
+            }
+            WordPhonemeScore(
+                word = rawWord,
+                score = score,
+                ipaTarget = "/$cleanW/",
+                issueAr = issue
+            )
+        }
+        val avg = if (wordScores.isNotEmpty()) wordScores.map { it.score }.average().toInt() else 80
         return PronunciationEvaluation(
-            overallScore = 88,
-            words = listOf(WordPhonemeScore(targetText, 88, "/target/", "نطق واضح وسليم")),
+            overallScore = avg,
+            words = wordScores,
             mouthTipMsa = focusCategory.tipMsa,
             mouthTipEgyptian = focusCategory.tipEgyptian,
             focusSoundLabel = focusCategory.symbols
         )
     }
 
+    /**
+     * AI Tutor conversational turn with gentle grammar correction, Arabic explanation, and deck vocabulary upgrades.
+     */
     suspend fun sendTutorMessage(
         scenario: ChatScenario,
         cefrLevel: String,
@@ -422,49 +349,147 @@ class GeminiService(private val dao: LinguaDao) {
         userMessage: String,
         activeDeckWords: List<String>
     ): TutorReplyDto {
-        val sampleWords = activeDeckWords.take(15).joinToString(", ")
+        val sampleDeckWords = activeDeckWords.take(15).joinToString(", ")
         val prompt = """
-            Roleplay: ${scenario.titleEn} (${scenario.systemRolePrompt})
-            Learner level: $cefrLevel, Dialect: $dialect
-            Suggested words: [$sampleWords]
-            Learner: "$userMessage"
-            Return STRICT JSON with replyEn, grammarCorrection, arabicExplanation, suggestedDeckWords.
+            Scenario: ${scenario.titleEn} (${scenario.systemRolePrompt})
+            Learner CEFR Level: $cefrLevel
+            Arabic Dialect Preference for explanation: $dialect (MSA = Modern Standard Arabic, EGYPTIAN = Egyptian Arabic)
+            Candidate vocabulary from learner's decks: [$sampleDeckWords]
+            Learner said: "$userMessage"
+            
+            Return a JSON object with:
+            - replyEn: natural conversational response in English keeping the roleplay going (2-3 sentences max)
+            - grammarCorrection: gentle correction of the learner's English if there was any mistake, or "Perfect phrasing! ✓" if none
+            - arabicExplanation: clear explanation in Arabic ($dialect) of any grammar/vocabulary improvement
+            - suggestedDeckWords: array of 2-3 strong English words from the learner's decks they can use in their next reply
         """.trimIndent()
-        val res = callGeminiCached("tutor_${scenario.id}_$userMessage", prompt)
+
+        val res = callGeminiCached("tutor_${scenario.id}_${cefrLevel}_${dialect}_$userMessage", prompt, jsonMode = true)
         return res.fold(
-            onSuccess = { try { json.decodeFromString<TutorReplyDto>(it) } catch (e: Exception) { fallbackTutorReply(activeDeckWords) } },
-            onFailure = { fallbackTutorReply(activeDeckWords) }
+            onSuccess = { txt ->
+                try {
+                    json.decodeFromString<TutorReplyDto>(txt)
+                } catch (_: Exception) {
+                    fallbackTutorReply(scenario, userMessage, activeDeckWords)
+                }
+            },
+            onFailure = {
+                fallbackTutorReply(scenario, userMessage, activeDeckWords)
+            }
         )
     }
 
-    private fun fallbackTutorReply(activeDeckWords: List<String>): TutorReplyDto {
+    private fun fallbackTutorReply(
+        scenario: ChatScenario,
+        userMessage: String,
+        activeDeckWords: List<String>
+    ): TutorReplyDto {
+        val suggestions = activeDeckWords.shuffled().take(3).ifEmpty { listOf("perspective", "mitigate", "scalability") }
         return TutorReplyDto(
-            replyEn = "That is a very good point! How would you implement that in a production environment?",
-            grammarCorrection = "Clear phrasing! You communicated your idea effectively.",
-            arabicExplanation = "إجابتك واضحة، حاول استخدام كلمات تقنية أكثر تخصصاً لرفع الدرجة.",
-            suggestedDeckWords = activeDeckWords.shuffled().take(3).ifEmpty { listOf("scalability", "mitigate", "resilient") }
+            replyEn = "That's a very thoughtful point! Could you elaborate a bit more on the specific outcome and how you handled the main obstacles?",
+            grammarCorrection = if (userMessage.split(" ").size < 5) {
+                "Tip: Try expanding your sentence using connectors like 'Furthermore' or 'As a consequence'."
+            } else {
+                "Clear sentence structure! You communicated your main idea effectively."
+            },
+            arabicExplanation = "جملتك واضحة، ولرفع مستواك إلى درجة أعلى حاول ربط الجمل واستخدام إحدى الكلمات المقترحة أدناه من بطاقاتك.",
+            suggestedDeckWords = suggestions
         )
     }
 
+    /**
+     * Generates Arabic translations and Key Vocabulary list for custom pasted transcripts / SRT / YouTube text.
+     */
     suspend fun generateSubtitlesAndVocab(rawEnglishText: String): SubtitleAiPackDto {
-        val rawLines = rawEnglishText.lines().map { it.trim() }.filter { it.isNotBlank() }.take(10)
-        val lines = rawLines.mapIndexed { i, l ->
-            SubtitleLine(i, i * 5, (i + 1) * 5, l, "الترجمة التفاعلية: $l")
+        val rawLines = rawEnglishText
+            .lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.matches(Regex("^\\d+$")) && !it.contains("-->") }
+            .take(12)
+
+        val prompt = """
+            Translate each of these English video subtitle lines into clear, natural Arabic and extract 5 key vocabulary words with IPA and deck category (OXFORD, IELTS, or IT).
+            Return JSON:
+            {
+              "lines": [ { "index": 0, "startSec": 0, "endSec": 5, "textEn": "...", "textAr": "..." } ],
+              "keyVocab": [ { "word": "...", "arabic": "...", "ipa": "...", "deck": "OXFORD" } ]
+            }
+            English lines:
+            ${rawLines.joinToString("\n")}
+        """.trimIndent()
+
+        val res = callGeminiCached("subtitles_pack", prompt, jsonMode = true)
+        return res.fold(
+            onSuccess = { txt ->
+                try {
+                    json.decodeFromString<SubtitleAiPackDto>(txt)
+                } catch (_: Exception) {
+                    fallbackSubtitlePack(rawLines)
+                }
+            },
+            onFailure = {
+                fallbackSubtitlePack(rawLines)
+            }
+        )
+    }
+
+    private fun fallbackSubtitlePack(lines: List<String>): SubtitleAiPackDto {
+        val subLines = lines.mapIndexed { idx, line ->
+            SubtitleLine(
+                index = idx,
+                startSec = idx * 6,
+                endSec = (idx + 1) * 6,
+                textEn = line,
+                textAr = "الترجمة العربية التفاعلية: $line"
+            )
         }
         val vocab = listOf(
-            KeyVocabItem("perspective", "منظور", "/pərˈspektɪv/", "oxford5000"),
-            KeyVocabItem("scalability", "قابلية التوسع", "/ˌskeɪləˈbɪləti/", "it_industry")
+            KeyVocabItem("perspective", "منظور / وجهة نظر", "/pərˈspektɪv/", "OXFORD"),
+            KeyVocabItem("mitigate", "يخفف من حدة", "/ˈmɪtɪɡeɪt/", "IELTS"),
+            KeyVocabItem("scalability", "القابلية للتوسع", "/ˌskeɪləˈbɪləti/", "IT")
         )
-        return SubtitleAiPackDto(lines, vocab)
+        return SubtitleAiPackDto(lines = subLines, keyVocab = vocab)
     }
 
-    suspend fun evaluateIeltsResponse(topic: String, userText: String): IeltsAssessmentDto {
+    /**
+     * Evaluates IELTS Writing or Speaking response with estimated Band Score (1.0 - 9.0) and Arabic feedback.
+     */
+    suspend fun evaluateIeltsResponse(promptTopic: String, userResponse: String): IeltsAssessmentDto {
+        val prompt = """
+            Evaluate this IELTS learner response for topic: "$promptTopic".
+            Learner response: "$userResponse"
+            Return JSON with:
+            - estimatedBand: e.g. "Band 7.0"
+            - lexicalResourceFeedbackAr: Arabic feedback on vocabulary choice
+            - grammarFeedbackAr: Arabic feedback on grammar & sentence variety
+            - coherenceFeedbackAr: Arabic feedback on cohesion and structure
+            - improvedSampleEn: a Band 8.5 polished version of the learner's response in English
+        """.trimIndent()
+
+        val res = callGeminiCached("ielts_eval_$userResponse", prompt, jsonMode = true)
+        return res.fold(
+            onSuccess = { txt ->
+                try {
+                    json.decodeFromString<IeltsAssessmentDto>(txt)
+                } catch (_: Exception) {
+                    fallbackIeltsAssessment(userResponse)
+                }
+            },
+            onFailure = {
+                fallbackIeltsAssessment(userResponse)
+            }
+        )
+    }
+
+    private fun fallbackIeltsAssessment(userResponse: String): IeltsAssessmentDto {
+        val wordCount = userResponse.trim().split(Regex("\\s+")).size
+        val band = if (wordCount > 25) "Band 7.0" else "Band 6.0"
         return IeltsAssessmentDto(
-            estimatedBand = "Band 7.0",
-            lexicalResourceFeedbackAr = "ثروة لغوية جيدة، حاول إدراج مصطلحات أكاديمية متنوعة.",
-            grammarFeedbackAr = "القواعد سليمة في معظمها مع تنوع ملحوظ في التراكيب.",
-            coherenceFeedbackAr = "الأفكار متسلسلة ومنطقية مع روابط واضحة بين الفقرات.",
-            improvedSampleEn = "Furthermore, adopting innovative solutions can substantially mitigate challenges."
+            estimatedBand = band,
+            lexicalResourceFeedbackAr = "استخدام جيد للمفردات؛ يمكنك رفع الدرجة بإدراج كلمات أكاديمية مثل mitigate و ubiquitous و substantial.",
+            grammarFeedbackAr = "التراكيب النحوية سليمة في معظمها؛ حاول التنويع بين الجمل البسيطة والجمل الشرطية أو الموصولة.",
+            coherenceFeedbackAr = "الأفكار متسلسلة؛ استخدم روابط أكاديمية مثل Furthermore و Consequently و Albeit.",
+            improvedSampleEn = "Furthermore, empirical evidence demonstrates that adopting sustainable technology can substantially mitigate environmental challenges while fostering unprecedented growth."
         )
     }
 }

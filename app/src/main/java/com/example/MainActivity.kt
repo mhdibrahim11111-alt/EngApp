@@ -18,7 +18,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.paging.compose.collectAsLazyPagingItems
 import com.example.ui.*
 import com.example.ui.components.AiDefinitionBottomSheet
 import com.example.ui.screens.*
@@ -41,16 +40,12 @@ fun LinguaBridgeApp(vm: LinguaBridgeViewModel = viewModel()) {
     val stats by vm.userStats.collectAsStateWithLifecycle()
     val transcripts by vm.transcripts.collectAsStateWithLifecycle()
     val pronunciationHistory by vm.pronunciationHistory.collectAsStateWithLifecycle()
-    val decks by vm.decks.collectAsStateWithLifecycle()
-    val assetImportProgress by vm.assetImportProgress.collectAsStateWithLifecycle()
 
     val currentTab by vm.currentTab.collectAsStateWithLifecycle()
     val subScreen by vm.subScreen.collectAsStateWithLifecycle()
     val learnModeTab by vm.learnModeTab.collectAsStateWithLifecycle()
     val speakModeTab by vm.speakModeTab.collectAsStateWithLifecycle()
     val inspectedWord by vm.inspectedWord.collectAsStateWithLifecycle()
-    val wordVariants by vm.wordVariants.collectAsStateWithLifecycle()
-    val isEnrichingCard by vm.isEnrichingCard.collectAsStateWithLifecycle()
     val bannerMessage by vm.bannerMessage.collectAsStateWithLifecycle()
     val isAiLoading by vm.isAiLoading.collectAsStateWithLifecycle()
 
@@ -58,14 +53,6 @@ fun LinguaBridgeApp(vm: LinguaBridgeViewModel = viewModel()) {
     val srsQueue by vm.srsQueue.collectAsStateWithLifecycle()
     val srsIndex by vm.srsIndex.collectAsStateWithLifecycle()
     val vocabBrowserDeckFilter by vm.vocabBrowserDeckFilter.collectAsStateWithLifecycle()
-    val pagedEntries = vm.pagedEntries.collectAsLazyPagingItems()
-
-    // Bulk Import Preview & Progress
-    val importPreview by vm.importPreview.collectAsStateWithLifecycle()
-    val importProgress by vm.importProgress.collectAsStateWithLifecycle()
-
-    // Generate Vocabulary Progress
-    val generateProgress by vm.generateProgress.collectAsStateWithLifecycle()
 
     // Lesson State
     val activeExercises by vm.activeExercises.collectAsStateWithLifecycle()
@@ -184,22 +171,16 @@ fun LinguaBridgeApp(vm: LinguaBridgeViewModel = viewModel()) {
                 // Active SubScreen or Main Tab Content
                 when (subScreen) {
                     SubScreen.SRS_REVIEW -> {
-                        val currentDeckId = srsQueue.getOrNull(srsIndex)?.deck
-                        val totalForDeck = words.count { it.deck == currentDeckId }
                         SrsReviewScreen(
                             queue = srsQueue,
                             currentIndex = srsIndex,
                             arabicDialect = stats.arabicDialect,
-                            totalDeckCount = totalForDeck,
                             onNavigateCard = { vm.navigateSrsCard(it) },
                             onGrade = { vm.submitSrsGrade(it) },
                             onInspectWord = { vm.inspectWord(it) },
                             onToggleMastered = { vm.toggleMasteredOnWord(it) },
-                            onSpeakWord = { w, gb -> vm.playWordAudio(w, isBritish = gb) },
+                            onSpeakWord = { text, gb -> vm.speakEnglish(text, isBritish = gb) },
                             onSwitchToListView = { vm.openVocabBrowser(null) },
-                            posVariants = wordVariants,
-                            onSelectVariant = { vm.selectVariant(it) },
-                            isEnriching = isEnrichingCard,
                             onBack = { vm.closeSubScreen() }
                         )
                     }
@@ -207,37 +188,20 @@ fun LinguaBridgeApp(vm: LinguaBridgeViewModel = viewModel()) {
                     SubScreen.VOCAB_BROWSER -> {
                         VocabularyBrowserScreen(
                             words = words,
-                            pagedWords = pagedEntries,
                             initialDeckFilter = vocabBrowserDeckFilter,
                             onInspectWord = { vm.inspectWord(it) },
                             onToggleMastered = { vm.toggleMasteredOnWord(it) },
                             onToggleFavorite = { vm.toggleFavoriteOnWord(it) },
-                            onSpeakWord = { vm.playWordAudio(it) },
+                            onSpeakWord = { vm.speakEnglish(it) },
                             onLaunchFlashcardMode = { deck -> vm.startSrsReview(deck) },
-                            onExportDeckCsv = { uri, deck -> vm.exportDeckCsv(uri, deck) },
-                            onExportDeckJson = { uri, deck -> vm.exportDeckJson(uri, deck) },
-                            onImportBackup = { uri, deck -> vm.importBackup(uri, deck) },
                             onBack = { vm.closeSubScreen() }
                         )
                     }
 
                     SubScreen.CSV_IMPORT -> {
                         CsvJsonImportScreen(
-                            preview = importPreview,
-                            importProgress = importProgress,
-                            onPreview = { raw, deck -> vm.previewImportData(raw, deck) },
-                            onConfirmImport = { targetDeck -> vm.executeImport(targetDeck) },
-                            onBack = { vm.closeSubScreen() }
-                        )
-                    }
-
-                    SubScreen.GENERATE_VOCAB -> {
-                        GenerateVocabularyScreen(
-                            progress = generateProgress,
-                            onStartGenerate = { topic, lvl, cnt, dck ->
-                                vm.startGenerateVocabulary(topic, lvl, cnt, dck)
-                            },
-                            onCancel = { vm.cancelGenerateVocabulary() },
+                            isAiLoading = isAiLoading,
+                            onImport = { raw, deck -> vm.importCsvOrJsonDeck(raw, deck) },
                             onBack = { vm.closeSubScreen() }
                         )
                     }
@@ -264,12 +228,9 @@ fun LinguaBridgeApp(vm: LinguaBridgeViewModel = viewModel()) {
                                 HomeScreen(
                                     words = words,
                                     stats = stats,
-                                    decks = decks,
-                                    assetImportProgress = assetImportProgress,
                                     onStartSrsReview = { deck -> vm.startSrsReview(deck) },
                                     onOpenVocabBrowser = { deck -> vm.openVocabBrowser(deck) },
                                     onOpenCsvImport = { vm.openSubScreen(SubScreen.CSV_IMPORT) },
-                                    onOpenGenerateVocab = { vm.openSubScreen(SubScreen.GENERATE_VOCAB) },
                                     onStartLesson = { subset, weak -> vm.startLesson(subset, weak) },
                                     onToggleDeck = { vm.toggleDeckSelection(it) },
                                     onInspectWord = { vm.inspectWord(it) },
@@ -277,11 +238,7 @@ fun LinguaBridgeApp(vm: LinguaBridgeViewModel = viewModel()) {
                                     onSpeakWord = { txt, gb -> vm.speakEnglish(txt, isBritish = gb) },
                                     onToggleUiLang = { vm.toggleUiLanguage() },
                                     onToggleDialect = { vm.toggleArabicDialect() },
-                                    onToggleDarkMode = { vm.toggleDarkMode() },
-                                    onStartDeckEnrichment = { deckId -> vm.startDeckEnrichment(deckId) },
-                                    posVariants = wordVariants,
-                                    onSelectVariant = { vm.selectVariant(it) },
-                                    isEnrichingCard = isEnrichingCard
+                                    onToggleDarkMode = { vm.toggleDarkMode() }
                                 )
                             }
 
@@ -373,9 +330,9 @@ fun LinguaBridgeApp(vm: LinguaBridgeViewModel = viewModel()) {
                     word = word,
                     arabicDialect = stats.arabicDialect,
                     onDismiss = { vm.inspectWord(null) },
-                    onSpeakUs = { vm.playWordAudio(word, isBritish = false) },
-                    onSpeakGb = { vm.playWordAudio(word, isBritish = true) },
-                    onSpeakText = { vm.playSentenceAudio(it) },
+                    onSpeakUs = { vm.speakEnglish(word.word, isBritish = false) },
+                    onSpeakGb = { vm.speakEnglish(word.word, isBritish = true) },
+                    onSpeakText = { vm.speakEnglish(it) },
                     onToggleMastered = { vm.toggleMasteredOnWord(word) },
                     onToggleFavorite = { vm.toggleFavoriteOnWord(word) }
                 )
