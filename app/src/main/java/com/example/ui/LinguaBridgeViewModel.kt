@@ -1,15 +1,16 @@
 package com.example.ui
 
 import android.app.Application
-import android.speech.tts.TextToSpeech
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.paging.PagingData
+import androidx.paging.cachedIn
 import com.example.data.*
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import java.util.Locale
 import java.util.UUID
 
 enum class MainTab(val route: String, val labelAr: String, val labelEn: String) {
@@ -26,7 +27,8 @@ enum class SubScreen {
     VOCAB_BROWSER,
     CSV_IMPORT,
     LESSON_SESSION,
-    WEAK_WORDS_PRACTICE
+    WEAK_WORDS_PRACTICE,
+    GENERATE_VOCAB
 }
 
 enum class LearnModeTab(val titleAr: String, val titleEn: String) {
@@ -43,15 +45,17 @@ enum class SpeakModeTab(val titleAr: String, val titleEn: String) {
 
 class LinguaBridgeViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val database = LinguaDatabase.getInstance(application)
-    private val geminiService = GeminiService(database.linguaDao())
-    val repository = LinguaRepository(database.linguaDao(), geminiService)
+    val database = LinguaDatabase.getInstance(application)
+    val geminiService = GeminiService(database.linguaDao())
+    val repository = LinguaRepository(database, geminiService, application)
 
-    // Android Text-To-Speech for US & GB English audio playback
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
+    // Audio playback manager (Media3 ExoPlayer for audio_url + Android TTS fallback)
+    val audioManager = AudioPlaybackManager(application)
 
-    val allWords: StateFlow<List<WordEntity>> = repository.allWords
+    // Asset import progress
+    val assetImportProgress = AssetImporter.progress
+
+    val allWords: StateFlow<List<EntryWithProgress>> = repository.allWords
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val userStats: StateFlow<UserStatsEntity> = repository.userStats
@@ -64,7 +68,10 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
     val pronunciationHistory: StateFlow<List<PronunciationAttemptEntity>> = repository.pronunciationHistory
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Navigation & Active Modals
+    val decks: StateFlow<List<DeckEntity>> = repository.decks
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Navigation & Active SubScreen
     private val _currentTab = MutableStateFlow(MainTab.HOME)
     val currentTab: StateFlow<MainTab> = _currentTab.asStateFlow()
 
@@ -77,9 +84,15 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
     private val _speakModeTab = MutableStateFlow(SpeakModeTab.PRONUNCIATION)
     val speakModeTab: StateFlow<SpeakModeTab> = _speakModeTab.asStateFlow()
 
-    // Detailed AI Definition Sheet (Trancy-style drawer)
-    private val _inspectedWord = MutableStateFlow<WordEntity?>(null)
-    val inspectedWord: StateFlow<WordEntity?> = _inspectedWord.asStateFlow()
+    // Inspected Word & Multi-POS Variants
+    private val _inspectedWord = MutableStateFlow<EntryWithProgress?>(null)
+    val inspectedWord: StateFlow<EntryWithProgress?> = _inspectedWord.asStateFlow()
+
+    private val _wordVariants = MutableStateFlow<List<EntryWithProgress>>(emptyList())
+    val wordVariants: StateFlow<List<EntryWithProgress>> = _wordVariants.asStateFlow()
+
+    private val _isEnrichingCard = MutableStateFlow(false)
+    val isEnrichingCard: StateFlow<Boolean> = _isEnrichingCard.asStateFlow()
 
     // Status Toast / Banner message
     private val _bannerMessage = MutableStateFlow<String?>(null)
@@ -89,16 +102,16 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
     val isAiLoading: StateFlow<Boolean> = _isAiLoading.asStateFlow()
 
     // SRS Session State
-    private val _srsQueue = MutableStateFlow<List<WordEntity>>(emptyList())
-    val srsQueue: StateFlow<List<WordEntity>> = _srsQueue.asStateFlow()
+    private val _srsQueue = MutableStateFlow<List<EntryWithProgress>>(emptyList())
+    val srsQueue: StateFlow<List<EntryWithProgress>> = _srsQueue.asStateFlow()
 
     private val _srsIndex = MutableStateFlow(0)
     val srsIndex: StateFlow<Int> = _srsIndex.asStateFlow()
 
-    private val _srsShowAnswer = MutableStateFlow(true) // Trancy card shows rich view or flip mode
+    private val _srsShowAnswer = MutableStateFlow(true)
     val srsShowAnswer: StateFlow<Boolean> = _srsShowAnswer.asStateFlow()
 
-    // Active Duolingo-style Lesson State
+    // Duolingo-style Lesson State
     private val _activeExercises = MutableStateFlow<List<ExerciseItem>>(emptyList())
     val activeExercises: StateFlow<List<ExerciseItem>> = _activeExercises.asStateFlow()
 
@@ -159,35 +172,75 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
     private val _ieltsAssessment = MutableStateFlow<IeltsAssessmentDto?>(null)
     val ieltsAssessment: StateFlow<IeltsAssessmentDto?> = _ieltsAssessment.asStateFlow()
 
+    // Vocabulary Browser Search & Filter
+    private val _vocabBrowserDeckFilter = MutableStateFlow<String?>(null)
+    val vocabBrowserDeckFilter: StateFlow<String?> = _vocabBrowserDeckFilter.asStateFlow()
+
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    // Paged words flow
+    private val _selectedDeckForPaging = MutableStateFlow<String?>(null)
+    val pagedEntries: Flow<PagingData<EntryWithProgress>> = _selectedDeckForPaging
+        .flatMapLatest { deck -> repository.getPagedEntries(deck) }
+        .cachedIn(viewModelScope)
+
+    // Bulk Import Preview State
+    private val _importPreview = MutableStateFlow<ImportPreview?>(null)
+    val importPreview: StateFlow<ImportPreview?> = _importPreview.asStateFlow()
+
+    private val _importProgress = MutableStateFlow<Pair<Int, Int>?>(null) // (imported, total)
+    val importProgress: StateFlow<Pair<Int, Int>?> = _importProgress.asStateFlow()
+
+    // Background Deck Enrichment Progress per Deck
+    private val _deckEnrichmentProgress = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val deckEnrichmentProgress: StateFlow<Map<String, Int>> = _deckEnrichmentProgress.asStateFlow()
+
+    // Generate Vocabulary Tool State
+    private val _generateProgress = MutableStateFlow<Pair<Int, Int>?>(null) // (currentGenerated, targetCount)
+    val generateProgress: StateFlow<Pair<Int, Int>?> = _generateProgress.asStateFlow()
+    private var generateJob: Job? = null
+
     init {
         viewModelScope.launch {
             repository.ensureSeeded()
             resetTutorChat(ChatScenario.IT_INTERVIEW)
-        }
-        tts = TextToSpeech(application) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                tts?.language = Locale.US
-                ttsReady = true
-            }
         }
     }
 
     override fun onCleared() {
         super.onCleared()
         playbackJob?.cancel()
-        tts?.stop()
-        tts?.shutdown()
+        generateJob?.cancel()
+        audioManager.release()
+    }
+
+    // Play Audio (Media3 ExoPlayer for audio_url, otherwise Android TTS)
+    fun playWordAudio(word: EntryWithProgress, isBritish: Boolean = false) {
+        audioManager.playAudio(
+            audioUrl = word.audioUrl,
+            textFallback = word.text,
+            isBritish = isBritish,
+            playbackSpeed = _playbackSpeed.value
+        )
+    }
+
+    fun playSentenceAudio(sentence: String) {
+        audioManager.playAudio(
+            audioUrl = null,
+            textFallback = sentence,
+            playbackSpeed = _playbackSpeed.value
+        )
     }
 
     fun speakEnglish(text: String, isBritish: Boolean = false, slow: Boolean = false) {
-        if (!ttsReady) return
-        tts?.language = if (isBritish) Locale.UK else Locale.US
-        val rate = when {
-            slow -> 0.72f
-            else -> _playbackSpeed.value
-        }
-        tts?.setSpeechRate(rate)
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, UUID.randomUUID().toString())
+        val speed = if (slow) 0.72f else _playbackSpeed.value
+        audioManager.playAudio(
+            audioUrl = null,
+            textFallback = text,
+            isBritish = isBritish,
+            playbackSpeed = speed
+        )
     }
 
     fun selectTab(tab: MainTab) {
@@ -211,8 +264,41 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
         _speakModeTab.value = tab
     }
 
-    fun inspectWord(word: WordEntity?) {
+    fun openVocabBrowser(deckFilter: String? = null) {
+        _vocabBrowserDeckFilter.value = deckFilter
+        _selectedDeckForPaging.value = deckFilter
+        _subScreen.value = SubScreen.VOCAB_BROWSER
+    }
+
+    fun setSearchQuery(query: String) {
+        _searchQuery.value = query
+    }
+
+    /**
+     * Inspects word, queries variants with different POS, and triggers Lazy AI enrichment if needed
+     */
+    fun inspectWord(word: EntryWithProgress?) {
         _inspectedWord.value = word
+        if (word == null) {
+            _wordVariants.value = emptyList()
+            return
+        }
+
+        viewModelScope.launch {
+            // Find all POS variants for the same text
+            val variants = repository.getWordVariants(word.text)
+            _wordVariants.value = variants
+
+            // Lazy AI Enrichment: If fields are missing, enrich in background while showing shimmer
+            if (!word.isEnriched && (word.arabic.isBlank() || word.ipa.isBlank() || word.examplesEn.isBlank())) {
+                _isEnrichingCard.value = true
+                val enrichedEntity = repository.lazyEnrichEntry(word.entry, userStats.value.arabicDialect)
+                _isEnrichingCard.value = false
+                _inspectedWord.value = word.copy(entry = enrichedEntity)
+                // refresh variants
+                _wordVariants.value = repository.getWordVariants(word.text)
+            }
+        }
     }
 
     fun inspectWordByText(rawWord: String) {
@@ -220,8 +306,8 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
         if (clean.isBlank()) return
         val match = allWords.value.find { it.word.equals(clean, ignoreCase = true) }
         if (match != null) {
-            _inspectedWord.value = match
-            speakEnglish(match.word)
+            inspectWord(match)
+            playWordAudio(match)
         } else {
             viewModelScope.launch {
                 _isAiLoading.value = true
@@ -230,10 +316,14 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
                     dialect = userStats.value.arabicDialect
                 )
                 _isAiLoading.value = false
-                _inspectedWord.value = added
-                speakEnglish(added.word)
+                inspectWord(added)
+                playWordAudio(added)
             }
         }
+    }
+
+    fun selectVariant(variant: EntryWithProgress) {
+        inspectWord(variant)
     }
 
     fun clearBanner() {
@@ -247,19 +337,13 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
     // Onboarding & Preferences
     fun completeOnboarding(goal: String, cefr: String, dailyMinutes: Int, dialect: String) {
         viewModelScope.launch {
-            val activeDecks = when (goal) {
-                "IELTS" -> "IELTS,OXFORD"
-                "IT" -> "IT,OXFORD"
-                else -> "OXFORD,IELTS,IT"
-            }
             repository.updateStats {
                 it.copy(
                     onboardingCompleted = true,
                     learningGoal = goal,
                     cefrLevel = cefr,
                     dailyGoalMinutes = dailyMinutes,
-                    arabicDialect = dialect,
-                    activeDecksCsv = activeDecks
+                    arabicDialect = dialect
                 )
             }
             showBanner("تم إعداد خطتك التعليمية المخصصة بنجاح! 🎉")
@@ -314,18 +398,17 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
     // SRS Review Flow
     fun startSrsReview(deckFilter: String? = null) {
         val now = System.currentTimeMillis()
-        val activeDecks = userStats.value.activeDecksCsv.split(",").toSet()
         val pool = allWords.value.filter { w ->
-            if (deckFilter != null) w.deck == deckFilter else w.deck in activeDecks
+            if (deckFilter != null) w.deck == deckFilter else true
         }
         val due = pool.filter { it.nextReviewDate <= now && it.masteryLevel != MasteryLevel.MASTERED.name }
-            .ifEmpty { pool.take(15) }
+            .ifEmpty { pool.take(20) }
 
         _srsQueue.value = due
         _srsIndex.value = 0
         _srsShowAnswer.value = true
         _subScreen.value = SubScreen.SRS_REVIEW
-        due.firstOrNull()?.let { speakEnglish(it.word) }
+        due.firstOrNull()?.let { playWordAudio(it) }
     }
 
     fun navigateSrsCard(delta: Int) {
@@ -333,7 +416,7 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
         if (list.isEmpty()) return
         val next = (_srsIndex.value + delta).coerceIn(0, list.lastIndex)
         _srsIndex.value = next
-        speakEnglish(list[next].word)
+        playWordAudio(list[next])
     }
 
     fun submitSrsGrade(grade: SrsGrade) {
@@ -344,7 +427,7 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
             repository.gradeWordSrs(current, grade)
             if (idx < list.lastIndex) {
                 _srsIndex.value = idx + 1
-                speakEnglish(list[idx + 1].word)
+                playWordAudio(list[idx + 1])
             } else {
                 showBanner("أحسنت! أكملت جلسة المراجعة المتباعدة اليوم (+XP) 🌟")
                 _subScreen.value = SubScreen.NONE
@@ -352,15 +435,7 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    private val _vocabBrowserDeckFilter = MutableStateFlow<String?>(null)
-    val vocabBrowserDeckFilter: StateFlow<String?> = _vocabBrowserDeckFilter.asStateFlow()
-
-    fun openVocabBrowser(deckFilter: String? = null) {
-        _vocabBrowserDeckFilter.value = deckFilter
-        _subScreen.value = SubScreen.VOCAB_BROWSER
-    }
-
-    fun toggleMasteredOnWord(word: WordEntity) {
+    fun toggleMasteredOnWord(word: EntryWithProgress) {
         viewModelScope.launch {
             val updated = repository.toggleWordMastered(word)
             if (_inspectedWord.value?.id == word.id) {
@@ -375,7 +450,7 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    fun toggleFavoriteOnWord(word: WordEntity) {
+    fun toggleFavoriteOnWord(word: EntryWithProgress) {
         viewModelScope.launch {
             val updated = repository.toggleWordFavorite(word)
             if (_inspectedWord.value?.id == word.id) {
@@ -390,8 +465,8 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    // Duolingo-Style Lesson Builder (8-10 words, all 8 exercise types)
-    fun startLesson(wordsSubset: List<WordEntity>, isWeakPractice: Boolean = false) {
+    // Duolingo-Style Lesson
+    fun startLesson(wordsSubset: List<EntryWithProgress>, isWeakPractice: Boolean = false) {
         val lessonWords = wordsSubset.take(8).ifEmpty { allWords.value.take(8) }
         val allPool = allWords.value.ifEmpty { lessonWords }
         val exercises = mutableListOf<ExerciseItem>()
@@ -465,7 +540,6 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
             exercises.add(item)
         }
 
-        // Add a Match Pairs round at the end
         val pairSample = lessonWords.take(4).map { it.word to it.arabicTranslation.split(";").first().trim() }
         if (pairSample.size >= 3) {
             exercises.add(
@@ -509,22 +583,135 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    // CSV / JSON Deck Import with Gemini Auto-Fill
-    fun importCsvOrJsonDeck(rawText: String, deck: String) {
+    // --- STEP 2: BULK IMPORT WITH PREVIEW & PROGRESS ---
+    fun previewImportData(rawText: String, defaultDeck: String) {
+        val preview = ImportExportManager.parseForPreview(rawText, defaultDeck)
+        _importPreview.value = preview
+    }
+
+    fun executeImport(targetDeck: String) {
+        val preview = _importPreview.value ?: return
+        if (preview.parsedEntries.isEmpty()) return
+
+        viewModelScope.launch {
+            _importProgress.value = Pair(0, preview.parsedEntries.size)
+            val insertedCount = ImportExportManager.executeBulkImport(
+                database = database,
+                entries = preview.parsedEntries,
+                targetDeck = targetDeck
+            ) { count, total ->
+                _importProgress.value = Pair(count, total)
+            }
+            _importProgress.value = null
+            _importPreview.value = null
+            showBanner("تم استيراد $insertedCount عنصر جديد بنجاح إلى حزمة $targetDeck! ✨")
+            _subScreen.value = SubScreen.NONE
+        }
+    }
+
+    // --- STEP 3: WORKMANAGER DECK ENRICHMENT ---
+    fun startDeckEnrichment(deckId: String) {
+        DeckEnrichmentWorker.startEnrichment(getApplication(), deckId)
+        showBanner("بدأت عملية إثراء حزمة $deckId في الخلفية عبر الذكاء الاصطناعي...")
+    }
+
+    fun pauseDeckEnrichment(deckId: String) {
+        DeckEnrichmentWorker.pauseEnrichment(getApplication(), deckId)
+        showBanner("تم إيقاف عملية إثراء حزمة $deckId مؤقتاً.")
+    }
+
+    // --- STEP 4: GENERATE VOCABULARY WITH AI ---
+    fun startGenerateVocabulary(topic: String, cefrLevel: String, targetCount: Int, targetDeck: String) {
+        generateJob?.cancel()
+        _generateProgress.value = Pair(0, targetCount)
+        _subScreen.value = SubScreen.GENERATE_VOCAB
+
+        generateJob = viewModelScope.launch {
+            var currentTotal = 0
+            val existingLower = database.linguaDao().getAllEntryIds().let {
+                // Fetch known word texts
+                allWords.value.map { it.text.lowercase().trim() }.toHashSet()
+            }
+
+            while (currentTotal < targetCount) {
+                val needed = (targetCount - currentTotal).coerceAtMost(50)
+                val batch = geminiService.generateVocabularyBatch(
+                    topic = topic,
+                    cefrLevel = cefrLevel,
+                    count = needed,
+                    existingWordsLower = existingLower
+                )
+
+                if (batch.isEmpty()) {
+                    showBanner("توقف توليد الكلمات: يرجى التحقق من الاتصال بمفتاح Gemini.")
+                    break
+                }
+
+                val entities = batch.map { dto ->
+                    val id = (System.currentTimeMillis() % 1_000_000_000L + (Math.random() * 10000).toInt()).toInt()
+                    existingLower.add(dto.text.lowercase().trim())
+                    EntryEntity(
+                        id = id,
+                        type = "word",
+                        deck = targetDeck,
+                        text = dto.text.trim(),
+                        pos = dto.pos.trim(),
+                        level = dto.level.trim().uppercase(),
+                        definitionEn = dto.definition_en.trim(),
+                        noteEn = "",
+                        examplesEn = dto.examples_en.trim(),
+                        definitionUrl = "",
+                        audioUrl = "",
+                        arabic = dto.arabic.trim(),
+                        ipa = dto.ipa.trim(),
+                        syllables = dto.syllables.trim(),
+                        etymologyAr = dto.etymology_ar.trim(),
+                        exampleAr = dto.example_ar.trim(),
+                        isEnriched = true
+                    )
+                }
+
+                database.linguaDao().insertEntries(entities)
+                currentTotal += entities.size
+                _generateProgress.value = Pair(currentTotal, targetCount)
+                delay(1200L) // Rate limiting
+            }
+
+            database.linguaDao().recalculateDeckCounts()
+            _generateProgress.value = null
+            showBanner("اكتمل توليد $currentTotal كلمة بنجاح وحُفظت في $targetDeck! 🎉")
+            _subScreen.value = SubScreen.NONE
+        }
+    }
+
+    fun cancelGenerateVocabulary() {
+        generateJob?.cancel()
+        _generateProgress.value = null
+        showBanner("تم إلغاء توليد الكلمات.")
+        _subScreen.value = SubScreen.NONE
+    }
+
+    // --- STEP 6: EXPORT / BACKUP (Storage Access Framework) ---
+    fun exportDeckCsv(uri: Uri, deckId: String) {
+        viewModelScope.launch {
+            ImportExportManager.exportDeckToCsv(getApplication(), uri, database, deckId)
+            showBanner("تم تصدير حزمة $deckId كملف CSV بنجاح! 💾")
+        }
+    }
+
+    fun exportDeckJson(uri: Uri, deckId: String) {
+        viewModelScope.launch {
+            ImportExportManager.exportDeckToJson(getApplication(), uri, database, deckId)
+            showBanner("تم تصدير النسخة الاحتياطية JSON لحزمة $deckId بنجاح! 💾")
+        }
+    }
+
+    fun importBackup(uri: Uri, targetDeck: String) {
         viewModelScope.launch {
             _isAiLoading.value = true
-            val count = repository.importCustomDeckData(
-                rawInput = rawText,
-                defaultDeck = deck,
-                dialect = userStats.value.arabicDialect
-            )
+            val count = ImportExportManager.importFromBackup(getApplication(), uri, database, targetDeck)
             _isAiLoading.value = false
-            if (count > 0) {
-                showBanner("تم استيراد $count كلمة وإكمال بياناتها تلقائياً عبر Gemini! ✨")
-                _subScreen.value = SubScreen.NONE
-            } else {
-                showBanner("تعذر قراءة البيانات؛ تأكد من تنسيق CSV أو JSON.")
-            }
+            showBanner("تمت استعادة $count كلمة من النسخة الاحتياطية بنجاح! 🔄")
         }
     }
 
@@ -561,7 +748,7 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
                     _isPlayingTranscript.value = false
                     break
                 } else if (_loopCurrentSentence.value) {
-                    // repeat same index
+                    // repeat
                 } else if (currentIdx < lines.lastIndex) {
                     _activeSubtitleIndex.value = currentIdx + 1
                 } else {
@@ -575,7 +762,7 @@ class LinguaBridgeViewModel(application: Application) : AndroidViewModel(applica
     fun stopTranscriptPlayback() {
         _isPlayingTranscript.value = false
         playbackJob?.cancel()
-        tts?.stop()
+        audioManager.stop()
     }
 
     fun jumpSubtitleLine(delta: Int, totalLines: Int) {

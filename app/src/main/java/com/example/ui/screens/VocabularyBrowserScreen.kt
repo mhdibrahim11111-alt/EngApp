@@ -1,6 +1,9 @@
 package com.example.ui.screens
 
+import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -33,45 +36,59 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.paging.compose.LazyPagingItems
+import androidx.paging.compose.itemKey
 import com.example.data.*
 import com.example.ui.theme.*
 
-/**
- * Replicates the exact Trancy Vocabulary Explorer & Book-Cover Deck Manager from Screenshots 2 & 3:
- * - Left / Top 3D Book-Cover Deck Cards (`IELTS Core 3575`, `IT Industry 1700`, `Oxford 5000 5836`)
- * - Top Filter Pills (`All`, `Mastered <count>`, `Favorites <count>`) with gold outline on active pill
- * - Top Right Toolbar:
- *   - `A+` Flashcard Study Carousel launcher (switches to Screenshot 1 Flashcard view)
- *   - `[|=]` Book-Cover Sidebar toggle
- *   - `👁️` Eye Mask toggle (hides/blurs Arabic translations for self-testing; tap to reveal)
- *   - `By date ↓` / `A → Z` / `CEFR Level` Sort selector
- * - Rich Word List Table Rows (`able`, `abandon`, `descriptor`, `depict`, `intrinsic`, `volatile`, `professed`, `discrepancy`, `compliance`, `supplement`, `jumble`, `cattle`, etc.)
- *   with `[US] 🔊 /ipa/`, inline multi-POS Arabic definitions (`v.`, `n.`, `adj.`, `web.`), and right action icons:
- *   - Gold Mastered checkbox (`☑` / `☐`)
- *   - Red Favorite heart (`❤️`)
- *   - Detailed AI Definition trigger (`≣🔍`)
- */
 @Composable
 fun VocabularyBrowserScreen(
     words: List<WordEntity>,
+    pagedWords: LazyPagingItems<WordEntity>?,
     initialDeckFilter: String? = null,
     onInspectWord: (WordEntity) -> Unit,
     onToggleMastered: (WordEntity) -> Unit,
     onToggleFavorite: (WordEntity) -> Unit,
-    onSpeakWord: (String) -> Unit,
+    onSpeakWord: (WordEntity) -> Unit,
     onLaunchFlashcardMode: (String?) -> Unit,
+    onExportDeckCsv: (Uri, String) -> Unit = { _, _ -> },
+    onExportDeckJson: (Uri, String) -> Unit = { _, _ -> },
+    onImportBackup: (Uri, String) -> Unit = { _, _ -> },
     onBack: () -> Unit
 ) {
     BackHandler { onBack() }
 
-    var selectedDeckId by remember { mutableStateOf(initialDeckFilter) } // null = All Decks
+    var selectedDeckId by remember { mutableStateOf(initialDeckFilter) }
     var filterTab by remember { mutableStateOf(VocabFilterTab.ALL) }
     var sortOrder by remember { mutableStateOf(VocabSortOrder.BY_DATE_DESC) }
     var showSortMenu by remember { mutableStateOf(false) }
+    var showExportMenu by remember { mutableStateOf(false) }
     var maskMeanings by remember { mutableStateOf(false) }
     var showBookSidebar by remember { mutableStateOf(false) }
     var revealedWordIds by remember { mutableStateOf(setOf<Int>()) }
     var highlightedWordId by remember { mutableStateOf<Int?>(null) }
+    var searchQuery by remember { mutableStateOf("") }
+
+    val activeDeck = selectedDeckId ?: "oxford5000"
+
+    // SAF Launchers for Export & Backup
+    val csvExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        if (uri != null) onExportDeckCsv(uri, activeDeck)
+    }
+
+    val jsonBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) onExportDeckJson(uri, activeDeck)
+    }
+
+    val backupImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) onImportBackup(uri, activeDeck)
+    }
 
     val deckFilteredWords = remember(words, selectedDeckId) {
         if (selectedDeckId == null) words
@@ -79,22 +96,32 @@ fun VocabularyBrowserScreen(
     }
 
     val masteredCount = remember(deckFilteredWords) {
-        deckFilteredWords.count { it.masteryLevel == MasteryLevel.MASTERED.name }
+        deckFilteredWords.count { it.isMastered || it.masteryLevel == MasteryLevel.MASTERED.name }
     }
     val favoritesCount = remember(deckFilteredWords) {
         deckFilteredWords.count { it.isFavorite }
     }
 
-    val displayedWords = remember(deckFilteredWords, filterTab, sortOrder) {
+    val displayedWords = remember(deckFilteredWords, filterTab, sortOrder, searchQuery) {
+        val searched = if (searchQuery.isBlank()) {
+            deckFilteredWords
+        } else {
+            val q = searchQuery.trim().lowercase()
+            deckFilteredWords.filter {
+                it.text.lowercase().contains(q) ||
+                it.arabic.contains(q) ||
+                it.definitionEn.lowercase().contains(q)
+            }
+        }
         val tabFiltered = when (filterTab) {
-            VocabFilterTab.ALL -> deckFilteredWords
-            VocabFilterTab.MASTERED -> deckFilteredWords.filter { it.masteryLevel == MasteryLevel.MASTERED.name }
-            VocabFilterTab.FAVORITES -> deckFilteredWords.filter { it.isFavorite }
+            VocabFilterTab.ALL -> searched
+            VocabFilterTab.MASTERED -> searched.filter { it.isMastered || it.masteryLevel == MasteryLevel.MASTERED.name }
+            VocabFilterTab.FAVORITES -> searched.filter { it.isFavorite }
         }
         when (sortOrder) {
             VocabSortOrder.BY_DATE_DESC -> tabFiltered.sortedByDescending { it.createdAt }
-            VocabSortOrder.ALPHABETICAL -> tabFiltered.sortedBy { it.word.lowercase() }
-            VocabSortOrder.CEFR_LEVEL -> tabFiltered.sortedByDescending { it.cefrLevel }
+            VocabSortOrder.ALPHABETICAL -> tabFiltered.sortedBy { it.text.lowercase() }
+            VocabSortOrder.CEFR_LEVEL -> tabFiltered.sortedByDescending { it.level }
         }
     }
 
@@ -104,15 +131,15 @@ fun VocabularyBrowserScreen(
     ) {
         CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // 1. Top Filter & Action Bar (Screenshot 3)
+                // 1. Top Filter & Action Bar
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Left: Back button + Filter Pills (All | Mastered 3 | Favorites)
+                    // Left: Back button + Filter Pills
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -133,7 +160,7 @@ fun VocabularyBrowserScreen(
                         }
 
                         TrancyFilterPill(
-                            text = "All",
+                            text = "All (${deckFilteredWords.size})",
                             selected = filterTab == VocabFilterTab.ALL,
                             onClick = { filterTab = VocabFilterTab.ALL }
                         )
@@ -151,12 +178,12 @@ fun VocabularyBrowserScreen(
                         )
                     }
 
-                    // Right Toolbar: [A+ Flashcards] [|= Sidebar] [👁️ Eye Mask] [By date ↓]
+                    // Right Toolbar: [A+ Flashcards] [|= Sidebar] [👁️ Eye Mask] [💾 Export/Backup] [By date ↓]
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        // A+ Flashcard Study Mode Button
+                        // Flashcard Mode
                         TrancyCircleToolButton(
                             icon = Icons.Default.FontDownload,
                             tooltip = "Flashcard Study Mode",
@@ -172,7 +199,7 @@ fun VocabularyBrowserScreen(
                             onClick = { showBookSidebar = !showBookSidebar }
                         )
 
-                        // Eye Mask Toggle (Hide/Show Arabic Meanings)
+                        // Eye Mask Toggle
                         TrancyCircleToolButton(
                             icon = if (maskMeanings) Icons.Default.VisibilityOff else Icons.Default.Visibility,
                             tooltip = "Mask Arabic Meanings",
@@ -183,7 +210,49 @@ fun VocabularyBrowserScreen(
                             }
                         )
 
-                        // Sort Dropdown Pill ("By date ↓")
+                        // Export / Backup Menu Button
+                        Box {
+                            TrancyCircleToolButton(
+                                icon = Icons.Default.SaveAlt,
+                                tooltip = "Export / Backup",
+                                isActive = showExportMenu,
+                                onClick = { showExportMenu = true }
+                            )
+
+                            DropdownMenu(
+                                expanded = showExportMenu,
+                                onDismissRequest = { showExportMenu = false },
+                                containerColor = Color(0xFF1A1E29)
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("تصدير الحزمة CSV", color = Color.White, fontSize = 13.sp) },
+                                    leadingIcon = { Icon(Icons.Default.Download, contentDescription = null, tint = OxfordGold) },
+                                    onClick = {
+                                        showExportMenu = false
+                                        csvExportLauncher.launch("${activeDeck}_export.csv")
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("نسخة احتياطية JSON", color = Color.White, fontSize = 13.sp) },
+                                    leadingIcon = { Icon(Icons.Default.Backup, contentDescription = null, tint = EmeraldPrimary) },
+                                    onClick = {
+                                        showExportMenu = false
+                                        jsonBackupLauncher.launch("${activeDeck}_backup.json")
+                                    }
+                                )
+                                HorizontalDivider(color = Color(0xFF282F3E))
+                                DropdownMenuItem(
+                                    text = { Text("استعادة من نسخة احتياطية", color = Color.White, fontSize = 13.sp) },
+                                    leadingIcon = { Icon(Icons.Default.Restore, contentDescription = null, tint = FreezeIceBlue) },
+                                    onClick = {
+                                        showExportMenu = false
+                                        backupImportLauncher.launch(arrayOf("application/json", "text/csv", "text/comma-separated-values", "*/*"))
+                                    }
+                                )
+                            }
+                        }
+
+                        // Sort Menu Dropdown
                         Box {
                             Surface(
                                 color = Color(0xFF1A1E29),
@@ -194,21 +263,21 @@ fun VocabularyBrowserScreen(
                                     .clickable { showSortMenu = true }
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
                                         text = sortOrder.labelEn,
                                         color = Color(0xFFE2E8F0),
                                         fontFamily = InterFontFamily,
-                                        fontSize = 12.sp
+                                        fontSize = 11.sp
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Icon(
                                         Icons.Default.KeyboardArrowDown,
                                         contentDescription = "Sort",
                                         tint = Color(0xFF94A3B8),
-                                        modifier = Modifier.size(16.dp)
+                                        modifier = Modifier.size(14.dp)
                                     )
                                 }
                             }
@@ -238,16 +307,45 @@ fun VocabularyBrowserScreen(
                     }
                 }
 
-                // 2. Book-Cover Deck Selector Row (Always accessible at top when sidebar is collapsed)
+                // Search Bar with FTS Filter
+                Surface(
+                    color = Color(0xFF121620),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)
+                ) {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        modifier = Modifier.fillMaxWidth().height(50.dp),
+                        placeholder = { Text("Search word, Arabic meaning, or definition...", fontSize = 12.sp, color = Color(0xFF64748B)) },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = OxfordGold, modifier = Modifier.size(18.dp)) },
+                        trailingIcon = {
+                            if (searchQuery.isNotBlank()) {
+                                IconButton(onClick = { searchQuery = "" }) {
+                                    Icon(Icons.Default.Clear, contentDescription = "Clear", tint = Color(0xFF64748B), modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = OxfordGold,
+                            unfocusedBorderColor = Color(0xFF262D3D),
+                            focusedContainerColor = Color(0xFF141822),
+                            unfocusedContainerColor = Color(0xFF141822)
+                        ),
+                        singleLine = true
+                    )
+                }
+
+                // 2. Book-Cover Deck Selector Row
                 AnimatedVisibility(visible = !showBookSidebar) {
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         item {
                             BookCoverDeckItem(
                                 title = "All Decks",
-                                countText = "11111",
+                                countText = "${words.size}",
                                 coverColors = listOf(Color(0xFF065F46), Color(0xFF042F2E)),
                                 selected = selectedDeckId == null,
                                 onClick = { selectedDeckId = null }
@@ -255,13 +353,18 @@ fun VocabularyBrowserScreen(
                         }
                         items(DeckType.entries) { deck ->
                             val colors = when (deck) {
+                                DeckType.OXFORD -> listOf(Color(0xFF7C3228), Color(0xFF4B1B15))
+                                DeckType.OPAL -> listOf(Color(0xFF1E3A8A), Color(0xFF172554))
+                                DeckType.PHRASES -> listOf(Color(0xFF065F46), Color(0xFF064E3B))
+                                DeckType.EVERYDAY -> listOf(Color(0xFFB45309), Color(0xFF78350F))
+                                DeckType.IDIOMS -> listOf(Color(0xFF831843), Color(0xFF500724))
                                 DeckType.IELTS -> listOf(Color(0xFF155E63), Color(0xFF0A363A))
                                 DeckType.IT -> listOf(Color(0xFF5B4582), Color(0xFF362752))
-                                DeckType.OXFORD -> listOf(Color(0xFF7C3228), Color(0xFF4B1B15))
                             }
+                            val count = words.count { it.deck == deck.id }.coerceAtLeast(deck.totalCatalogTarget)
                             BookCoverDeckItem(
                                 title = deck.titleEn,
-                                countText = "${deck.totalCatalogTarget}",
+                                countText = "$count",
                                 coverColors = colors,
                                 selected = selectedDeckId == deck.id,
                                 onClick = {
@@ -274,7 +377,7 @@ fun VocabularyBrowserScreen(
 
                 HorizontalDivider(color = Color(0xFF1B202C))
 
-                // 3. Main Body: Optional Left Book Sidebar (Screenshot 2) + Trancy Word Table List
+                // 3. Main Body: Optional Left Book Sidebar + Paging/List Table
                 Row(modifier = Modifier.fillMaxSize()) {
                     if (showBookSidebar) {
                         Column(
@@ -282,65 +385,99 @@ fun VocabularyBrowserScreen(
                                 .width(155.dp)
                                 .fillMaxHeight()
                                 .background(Color(0xFF090B10))
-                                .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(14.dp)
+                                .padding(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            BookCoverSidebarItem(
-                                title = "IELTS Core",
-                                countText = "3575",
-                                coverColors = listOf(Color(0xFF155E63), Color(0xFF0A363A)),
-                                selected = selectedDeckId == "IELTS",
-                                onClick = { selectedDeckId = if (selectedDeckId == "IELTS") null else "IELTS" }
-                            )
-                            BookCoverSidebarItem(
-                                title = "IT Industry",
-                                countText = "1700",
-                                coverColors = listOf(Color(0xFF5B4582), Color(0xFF362752)),
-                                selected = selectedDeckId == "IT",
-                                onClick = { selectedDeckId = if (selectedDeckId == "IT") null else "IT" }
-                            )
-                            BookCoverSidebarItem(
-                                title = "Oxford 5000",
-                                countText = "5836",
-                                coverColors = listOf(Color(0xFF7C3228), Color(0xFF4B1B15)),
-                                selected = selectedDeckId == "OXFORD",
-                                onClick = { selectedDeckId = if (selectedDeckId == "OXFORD") null else "OXFORD" }
-                            )
+                            DeckType.entries.forEach { deck ->
+                                val colors = when (deck) {
+                                    DeckType.OXFORD -> listOf(Color(0xFF7C3228), Color(0xFF4B1B15))
+                                    DeckType.OPAL -> listOf(Color(0xFF1E3A8A), Color(0xFF172554))
+                                    DeckType.PHRASES -> listOf(Color(0xFF065F46), Color(0xFF064E3B))
+                                    DeckType.EVERYDAY -> listOf(Color(0xFFB45309), Color(0xFF78350F))
+                                    DeckType.IDIOMS -> listOf(Color(0xFF831843), Color(0xFF500724))
+                                    DeckType.IELTS -> listOf(Color(0xFF155E63), Color(0xFF0A363A))
+                                    DeckType.IT -> listOf(Color(0xFF5B4582), Color(0xFF362752))
+                                }
+                                val count = words.count { it.deck == deck.id }.coerceAtLeast(deck.totalCatalogTarget)
+                                BookCoverSidebarItem(
+                                    title = deck.titleEn,
+                                    countText = "$count",
+                                    coverColors = colors,
+                                    selected = selectedDeckId == deck.id,
+                                    onClick = { selectedDeckId = if (selectedDeckId == deck.id) null else deck.id }
+                                )
+                            }
                         }
                         VerticalDivider(color = Color(0xFF1B202C))
                     }
 
-                    // Trancy Word List Table
-                    LazyColumn(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .testTag("trancy_vocab_table")
-                    ) {
-                        items(displayedWords, key = { it.id }) { word ->
-                            val isHighlighted = highlightedWordId == word.id
-                            val isMeaningsHidden = maskMeanings && (word.id !in revealedWordIds)
-                            TrancyWordListRow(
-                                word = word,
-                                isHighlighted = isHighlighted,
-                                isMeaningsMasked = isMeaningsHidden,
-                                onRowClick = {
-                                    highlightedWordId = word.id
-                                    if (isMeaningsHidden) {
-                                        revealedWordIds = revealedWordIds + word.id
-                                    } else {
-                                        onSpeakWord(word.word)
-                                    }
-                                },
-                                onSpeak = { onSpeakWord(word.word) },
-                                onToggleMastered = { onToggleMastered(word) },
-                                onToggleFavorite = { onToggleFavorite(word) },
-                                onOpenAiDefinition = {
-                                    highlightedWordId = word.id
-                                    onInspectWord(word)
+                    // Paging 3 Lazy List Table
+                    if (searchQuery.isBlank() && filterTab == VocabFilterTab.ALL && pagedWords != null) {
+                        LazyColumn(
+                            modifier = Modifier.weight(1f).fillMaxHeight().testTag("trancy_vocab_table")
+                        ) {
+                            items(
+                                count = pagedWords.itemCount,
+                                key = pagedWords.itemKey { it.id }
+                            ) { index ->
+                                val word = pagedWords[index]
+                                if (word != null) {
+                                    val isHighlighted = highlightedWordId == word.id
+                                    val isMeaningsHidden = maskMeanings && (word.id !in revealedWordIds)
+                                    TrancyWordListRow(
+                                        word = word,
+                                        isHighlighted = isHighlighted,
+                                        isMeaningsMasked = isMeaningsHidden,
+                                        onRowClick = {
+                                            highlightedWordId = word.id
+                                            if (isMeaningsHidden) {
+                                                revealedWordIds = revealedWordIds + word.id
+                                            } else {
+                                                onSpeakWord(word)
+                                            }
+                                        },
+                                        onSpeak = { onSpeakWord(word) },
+                                        onToggleMastered = { onToggleMastered(word) },
+                                        onToggleFavorite = { onToggleFavorite(word) },
+                                        onOpenAiDefinition = {
+                                            highlightedWordId = word.id
+                                            onInspectWord(word)
+                                        }
+                                    )
+                                    HorizontalDivider(color = Color(0xFF171B24), thickness = 1.dp)
                                 }
-                            )
-                            HorizontalDivider(color = Color(0xFF171B24), thickness = 1.dp)
+                            }
+                        }
+                    } else {
+                        // Standard filtered/sorted list
+                        LazyColumn(
+                            modifier = Modifier.weight(1f).fillMaxHeight().testTag("trancy_vocab_table")
+                        ) {
+                            items(displayedWords, key = { it.id }) { word ->
+                                val isHighlighted = highlightedWordId == word.id
+                                val isMeaningsHidden = maskMeanings && (word.id !in revealedWordIds)
+                                TrancyWordListRow(
+                                    word = word,
+                                    isHighlighted = isHighlighted,
+                                    isMeaningsMasked = isMeaningsHidden,
+                                    onRowClick = {
+                                        highlightedWordId = word.id
+                                        if (isMeaningsHidden) {
+                                            revealedWordIds = revealedWordIds + word.id
+                                        } else {
+                                            onSpeakWord(word)
+                                        }
+                                    },
+                                    onSpeak = { onSpeakWord(word) },
+                                    onToggleMastered = { onToggleMastered(word) },
+                                    onToggleFavorite = { onToggleFavorite(word) },
+                                    onOpenAiDefinition = {
+                                        highlightedWordId = word.id
+                                        onInspectWord(word)
+                                    }
+                                )
+                                HorizontalDivider(color = Color(0xFF171B24), thickness = 1.dp)
+                            }
                         }
                     }
                 }
@@ -404,9 +541,6 @@ private fun TrancyCircleToolButton(
     }
 }
 
-/**
- * 3D Book-Cover Deck Item (Horizontal Shelf Style)
- */
 @Composable
 private fun BookCoverDeckItem(
     title: String,
@@ -427,7 +561,6 @@ private fun BookCoverDeckItem(
             modifier = Modifier.padding(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Miniature 3D Book Cover with Spine
             Box(
                 modifier = Modifier
                     .width(44.dp)
@@ -435,7 +568,6 @@ private fun BookCoverDeckItem(
                     .clip(RoundedCornerShape(topStart = 3.dp, bottomStart = 3.dp, topEnd = 6.dp, bottomEnd = 6.dp))
                     .background(Brush.verticalGradient(coverColors))
             ) {
-                // Left spine groove
                 Box(
                     modifier = Modifier
                         .width(4.dp)
@@ -473,9 +605,6 @@ private fun BookCoverDeckItem(
     }
 }
 
-/**
- * 3D Book-Cover Sidebar Item (Exact Left Column from Screenshot 2)
- */
 @Composable
 private fun BookCoverSidebarItem(
     title: String,
@@ -536,10 +665,6 @@ private fun BookCoverSidebarItem(
     }
 }
 
-/**
- * Exact Trancy Word List Table Row (Screenshots 2 & 3):
- * [English Word]   [US] 🔊 /ipa/   [v. تَرَكَ ; هَجَرَ  n. تخلٍّ ; هجران  web. تخلّى عن]   [☑] [❤️] [≣🔍]
- */
 @Composable
 private fun TrancyWordListRow(
     word: WordEntity,
@@ -551,31 +676,17 @@ private fun TrancyWordListRow(
     onToggleFavorite: () -> Unit,
     onOpenAiDefinition: () -> Unit
 ) {
-    val isMastered = word.masteryLevel == MasteryLevel.MASTERED.name
+    val isMastered = word.isMastered || word.masteryLevel == MasteryLevel.MASTERED.name
 
     val formattedDefinitions = remember(word) {
         buildAnnotatedString {
-            withStyle(SpanStyle(color = Color(0xFF64748B), fontWeight = FontWeight.Medium, fontSize = 13.sp)) {
-                append("${word.partOfSpeech}  ")
+            if (word.pos.isNotBlank()) {
+                withStyle(SpanStyle(color = Color(0xFF64748B), fontWeight = FontWeight.Medium, fontSize = 13.sp)) {
+                    append("${word.pos}  ")
+                }
             }
             withStyle(SpanStyle(color = Color(0xFFE2E8F0), fontSize = 14.sp)) {
-                append(word.arabicTranslation)
-            }
-            if (word.secondaryPos.isNotBlank() && word.secondaryArabic.isNotBlank()) {
-                withStyle(SpanStyle(color = Color(0xFF64748B), fontWeight = FontWeight.Medium, fontSize = 13.sp)) {
-                    append("   ${word.secondaryPos}  ")
-                }
-                withStyle(SpanStyle(color = Color(0xFFCBD5E1), fontSize = 14.sp)) {
-                    append(word.secondaryArabic)
-                }
-            }
-            if (word.webArabicSynonyms.isNotBlank()) {
-                withStyle(SpanStyle(color = Color(0xFF64748B), fontWeight = FontWeight.Medium, fontSize = 13.sp)) {
-                    append("   web.  ")
-                }
-                withStyle(SpanStyle(color = Color(0xFF94A3B8), fontSize = 14.sp)) {
-                    append(word.webArabicSynonyms)
-                }
+                append(word.arabic.ifBlank { word.definitionEn })
             }
         }
     }
@@ -588,12 +699,10 @@ private fun TrancyWordListRow(
             .padding(horizontal = 14.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // 1. Left: English Word + US Phonetic Audio Row
-        Column(
-            modifier = Modifier.width(138.dp)
-        ) {
+        // Left: Word + US/Audio
+        Column(modifier = Modifier.width(138.dp)) {
             Text(
-                text = word.word,
+                text = word.text,
                 color = Color.White,
                 fontFamily = InterFontFamily,
                 fontWeight = FontWeight.Bold,
@@ -604,17 +713,15 @@ private fun TrancyWordListRow(
             Spacer(modifier = Modifier.height(4.dp))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .clickable { onSpeak() }
+                modifier = Modifier.clip(RoundedCornerShape(4.dp)).clickable { onSpeak() }
             ) {
                 Surface(
                     color = Color(0xFF1F2430),
                     shape = RoundedCornerShape(3.dp)
                 ) {
                     Text(
-                        text = "US",
-                        color = Color(0xFF94A3B8),
+                        text = if (word.audioUrl.isNotBlank()) "AUDIO" else "US",
+                        color = if (word.audioUrl.isNotBlank()) OxfordGold else Color(0xFF94A3B8),
                         fontFamily = InterFontFamily,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Bold,
@@ -624,13 +731,13 @@ private fun TrancyWordListRow(
                 Spacer(modifier = Modifier.width(4.dp))
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.VolumeUp,
-                    contentDescription = "Speak ${word.word}",
-                    tint = Color(0xFF64748B),
+                    contentDescription = "Speak ${word.text}",
+                    tint = if (word.audioUrl.isNotBlank()) OxfordGold else Color(0xFF64748B),
                     modifier = Modifier.size(13.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = word.ipaUs,
+                    text = word.ipa.ifBlank { "/${word.text}/" },
                     color = Color(0xFF64748B),
                     fontFamily = InterFontFamily,
                     fontSize = 11.sp,
@@ -642,7 +749,7 @@ private fun TrancyWordListRow(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        // 2. Middle: Multi-POS Arabic Definitions (or Masked Blur Pill when Eye Mask is active)
+        // Middle: Arabic/Definition
         Box(modifier = Modifier.weight(1f)) {
             if (isMeaningsMasked) {
                 Surface(
@@ -650,7 +757,7 @@ private fun TrancyWordListRow(
                     shape = RoundedCornerShape(6.dp)
                 ) {
                     Text(
-                        text = "••• اضغط لإظهار المعنى العربي •••",
+                        text = "••• اضغط لإظهار المعنى •••",
                         fontFamily = CairoFontFamily,
                         fontSize = 12.sp,
                         color = Color(0xFF64748B),
@@ -670,7 +777,7 @@ private fun TrancyWordListRow(
 
         Spacer(modifier = Modifier.width(6.dp))
 
-        // 3. Right Action Icons: [☑ Mastered] [❤️ Favorite] [≣🔍 AI Definition]
+        // Right Action Icons: Mastered, Favorite, AI Definition
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp)
@@ -701,9 +808,7 @@ private fun TrancyWordListRow(
 
             IconButton(
                 onClick = onOpenAiDefinition,
-                modifier = Modifier
-                    .size(32.dp)
-                    .testTag("row_ai_def_${word.word}")
+                modifier = Modifier.size(32.dp).testTag("row_ai_def_${word.text}")
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ManageSearch,
